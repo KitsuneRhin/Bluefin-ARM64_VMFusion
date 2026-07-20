@@ -78,13 +78,45 @@ The manifest has sections for `[fedora]`, `[fedora_v42..44]`, `[excluded]`,
 - **`[multimedia_overrides]`** is largely Intel GPU stack: `intel-gmmlib`,
   `intel-mediasdk`, `intel-vpl-gpu-rt`, `libva-intel-media-driver`. x86_64-only.
   The generic `mesa-*` entries in that section are fine on aarch64 and worth keeping.
-- **`igt-gpu-tools`** — verify aarch64 availability; drop if absent.
+- ~~**`igt-gpu-tools`** — verify aarch64 availability; drop if absent.~~
+  **Resolved 2026-07-20: KEEP.** `igt-gpu-tools-2.2-2.fc44.aarch64` is present in the F44
+  aarch64 repos. No change needed.
 
-**Recommended fix (upstreamable):** extend `build_files/shared/read-packages` and
-`03-packages.sh` to understand `[fedora_aarch64]`, `[fedora_x86_64]`, and
-`[excluded_aarch64]` sections, keyed off `$(uname -m)`. This is a small, well-scoped
-change that mirrors the existing `_v44` version-suffix convention. Prefer it over forking
-`base.toml` wholesale — a forked manifest diverges immediately and forever.
+A full static screen of `[fedora]` + `[fedora_v44]` (62 packages) against the F44 aarch64
+release *and* updates repos found **`grub2-efi-x64-cdboot` as the only genuine absence**.
+`pipewire-libs-extra` also fails to resolve in Fedora, but it is absent on x86_64 too — it
+comes from negativo17, where the aarch64 build does exist. Not an arch problem.
+
+Likewise verified against negativo17's aarch64 repo: all `mesa-*`, `libva`, `libheif`,
+`x264-libs`, `x265-libs` present; the four Intel packages absent. §1.1 was exactly right.
+
+**Implemented fix (upstreamable):** `patches/0001-arch-aware-package-manifest.patch` adds
+optional `[<section>_<arch>]` sections keyed off `$(uname -m)`, mirroring the existing
+`_v44` version-suffix convention.
+
+Note: **`read-packages` needed no change at all.** It already takes an arbitrary section
+name and exits 1 on a missing one, and `03-packages.sh` already has the
+`2>/dev/null || true` idiom for optional sections (used for `fedora_v${VERSION}`). The
+patch reuses that idiom, so it touches only `03-packages.sh` and `base.toml` — a smaller
+and more upstreamable diff than §1.1 originally anticipated.
+
+### 1.1a `20-tests.sh` asserts the x86 bootloader — found 2026-07-20
+
+Not previously identified. `20-tests.sh` has an `IMPORTANT_PACKAGES` list containing
+`grub2-efi-x64-cdboot` and hard-exits if any entry is missing. Moving the package to an
+arch section in `base.toml` is not enough — this assertion fails at the very end of
+Stage 2, after the entire expensive build. Patched in `0001` via a `uname -m` case that
+appends the correct payload for the arch.
+
+### 1.1b Dropping akmods breaks `05-override-install.sh` — found 2026-07-20
+
+Not previously identified, and a direct consequence of §0.2. `05-override-install.sh`
+runs `rpm --erase --nodeps kernel-devel` unconditionally under `set -e`, but
+`kernel-devel` is installed by `04-install-kernel-akmods.sh` — the very script we skip.
+On aarch64 the package is absent and the erase fails, killing Stage 1.
+
+Fixed in `patches/0002-tolerate-absent-kernel-devel.patch` by guarding the erase with an
+`rpm -q` check. Worth offering upstream: the guard is correct on x86_64 too.
 
 ### 1.2 `21-container-native-iso.sh` — drop entirely
 

@@ -1,0 +1,19 @@
+diff --git a/upstream/build_files/base/05-override-install.sh b/upstream/build_files/base/05-override-install.sh
+index 26d0c33..83097c0 100755
+--- a/upstream/build_files/base/05-override-install.sh
++++ b/upstream/build_files/base/05-override-install.sh
+@@ -7,8 +7,12 @@ set -eoux pipefail
+ # We do not need anything here at all
+ rm -rf /usr/src
+ rm -rf /usr/share/doc
+-# Remove kernel-devel from rpmdb because all package files are removed from /usr/src
+-rpm --erase --nodeps kernel-devel
++# Remove kernel-devel from rpmdb because all package files are removed from /usr/src.
++# kernel-devel is pulled in by 04-install-kernel-akmods.sh, which does not run on
++# arches without an akmods build (e.g. aarch64), so it may legitimately be absent.
++if rpm -q kernel-devel >/dev/null 2>&1; then
++    rpm --erase --nodeps kernel-devel
++fi
+ 
+ mkdir -p /usr/share/doc/bluefin
+ # Offline Bluefin documentation

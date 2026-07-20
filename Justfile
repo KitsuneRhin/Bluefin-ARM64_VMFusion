@@ -1,4 +1,4 @@
-export image_name := env("SurfaceBlue", "SurfaceBlue") # output image name, usually same as repo name, change as needed
+export image_name := env("IMAGE_NAME", "bluesilicon") # output image name, usually same as repo name, change as needed
 export default_tag := env("DEFAULT_TAG", "alpha")
 export bib_image := env("BIB_IMAGE", "quay.io/centos-bootc/bootc-image-builder:latest")
 
@@ -88,17 +88,29 @@ sudoif command *args:
 # Build the image using the specified parameters
 build $target_image=image_name $tag=default_tag:
     #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Materialise _build_ctx/ from the pristine upstream/ subtree + patches/
+    ./scripts/prepare-context.sh
 
     BUILD_ARGS=()
     if [[ -z "$(git status -s)" ]]; then
         BUILD_ARGS+=("--build-arg" "SHA_HEAD_SHORT=$(git rev-parse --short HEAD)")
     fi
 
+    # GITHUB_TOKEN is optional — ghcurl falls back to unauthenticated requests,
+    # but an authenticated build is far less likely to hit GitHub rate limits.
+    if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+        BUILD_ARGS+=("--secret" "id=GITHUB_TOKEN,env=GITHUB_TOKEN")
+    fi
+
     podman build \
         "${BUILD_ARGS[@]}" \
+        --platform linux/arm64 \
         --pull=newer \
+        --file Containerfile \
         --tag "${target_image}:${tag}" \
-        .
+        _build_ctx
 
 # Command: _rootful_load_image
 # Description: This script checks if the current user is root or running under sudo. If not, it attempts to resolve the image tag using podman inspect.
@@ -205,9 +217,9 @@ build-qcow2 $target_image=("localhost/" + image_name) $tag=default_tag: && (_bui
 [group('Build Virtal Machine Image')]
 build-raw $target_image=("localhost/" + image_name) $tag=default_tag: && (_build-bib target_image tag "raw" "disk_config/disk.toml")
 
-# Build an ISO virtual machine image
+# Build a VMDK virtual machine image (VMware Fusion — the primary target)
 [group('Build Virtal Machine Image')]
-build-iso $target_image=("localhost/" + image_name) $tag=default_tag: && (_build-bib target_image tag "iso" "disk_config/iso.toml")
+build-vmdk $target_image=("localhost/" + image_name) $tag=default_tag: && (_build-bib target_image tag "vmdk" "disk_config/disk.toml")
 
 # Rebuild a QCOW2 virtual machine image
 [group('Build Virtal Machine Image')]
@@ -217,9 +229,9 @@ rebuild-qcow2 $target_image=("localhost/" + image_name) $tag=default_tag: && (_r
 [group('Build Virtal Machine Image')]
 rebuild-raw $target_image=("localhost/" + image_name) $tag=default_tag: && (_rebuild-bib target_image tag "raw" "disk_config/disk.toml")
 
-# Rebuild an ISO virtual machine image
+# Rebuild a VMDK virtual machine image (VMware Fusion — the primary target)
 [group('Build Virtal Machine Image')]
-rebuild-iso $target_image=("localhost/" + image_name) $tag=default_tag: && (_rebuild-bib target_image tag "iso" "disk_config/iso.toml")
+rebuild-vmdk $target_image=("localhost/" + image_name) $tag=default_tag: && (_rebuild-bib target_image tag "vmdk" "disk_config/disk.toml")
 
 # Run a virtual machine with the specified image type and configuration
 _run-vm $target_image $tag $type $config:
@@ -270,10 +282,6 @@ run-vm-qcow2 $target_image=("localhost/" + image_name) $tag=default_tag: && (_ru
 # Run a virtual machine from a RAW image
 [group('Run Virtal Machine')]
 run-vm-raw $target_image=("localhost/" + image_name) $tag=default_tag: && (_run-vm target_image tag "raw" "disk_config/disk.toml")
-
-# Run a virtual machine from an ISO
-[group('Run Virtal Machine')]
-run-vm-iso $target_image=("localhost/" + image_name) $tag=default_tag: && (_run-vm target_image tag "iso" "disk_config/iso.toml")
 
 # Run a virtual machine using systemd-vmspawn
 [group('Run Virtal Machine')]

@@ -76,6 +76,33 @@ ghcr.io/ublue-os/brew:latest
   arm64  sha256:26fc5b56dad4aafaef39bfd1bee5657204fff31b5fb43c8af3646b3af71b94cf
 ```
 
+### 2.4 Trap: upstream's `image-versions.yml` pins `common` to an amd64 child
+
+Verified 2026-07-20. `upstream/image-versions.yml` pins:
+
+```
+common  sha256:2dfc002c2e9867c120a481d30fad5e7e71294b24c6682adc362c70a8459241a5
+brew    sha256:14ad3acb89bea0a7d98cacc206a4f590efcb794b7da7385bbeba4ed943289ad4
+```
+
+The `brew` digest is a **multi-arch index** and is safe to reuse. The `common` digest is
+**not an index** — it is the amd64 child manifest (`architecture: amd64` in its config
+blob). **Do not copy the `common` pin out of `image-versions.yml` into an arm64 build.**
+
+The corresponding index is `sha256:633ae6ef...` (§2.3), which currently *is* `:latest` and
+resolves to:
+
+```
+amd64  sha256:2dfc002c2e9867c120a481d30fad5e7e71294b24c6682adc362c70a8459241a5
+arm64  sha256:497cb90e7d30e1a93fda67c112b3146fb43e5e64a774301d2d7025cb57d1e90a
+```
+
+Our `Containerfile` pins the arm64 children directly so the arch is explicit rather than
+dependent on podman's platform resolution.
+
+Also re-verified 2026-07-20: the Silverblue 44 arm64 child digest in §2.3
+(`sha256:d9210934...`) is still the live arm64 entry of the `:44` index.
+
 ## 3. Third-party repo arm64 coverage
 
 | Source | arm64 | Evidence |

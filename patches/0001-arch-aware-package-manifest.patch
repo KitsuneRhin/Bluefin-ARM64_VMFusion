@@ -1,0 +1,146 @@
+diff --git a/upstream/build_files/base/03-packages.sh b/upstream/build_files/base/03-packages.sh
+index 00ef640..828f402 100755
+--- a/upstream/build_files/base/03-packages.sh
++++ b/upstream/build_files/base/03-packages.sh
+@@ -14,6 +14,10 @@ source /ctx/build_files/shared/package-lib.sh
+ READ_PKGS="python3 /ctx/build_files/shared/read-packages"
+ PKGS_TOML="/ctx/build_files/packages/base.toml"
+ 
++# Architecture suffix for the optional [<section>_<arch>] manifest sections.
++# Matches the TOML section naming: x86_64, aarch64.
++ARCH="$(uname -m)"
++
+ # use negativo17 for 3rd party packages with higher priority than default
+ # mitigate upstream packaging bug: https://bugzilla.redhat.com/show_bug.cgi?id=2332429
+ # swap the incorrectly installed OpenCL-ICD-Loader for ocl-icd, the expected package
+@@ -33,6 +37,11 @@ dnf5 config-manager setopt fedora-multimedia.priority=90
+ 
+ # use override to replace mesa and others with less crippled versions
+ readarray -t OVERRIDES < <($READ_PKGS "$PKGS_TOML" multimedia_overrides)
++
++# Arch-specific overrides (e.g. the Intel GPU stack on x86_64)
++readarray -t _arch_overrides < <($READ_PKGS "$PKGS_TOML" "multimedia_overrides_${ARCH}" 2>/dev/null || true)
++OVERRIDES+=("${_arch_overrides[@]}")
++
+ dnf5 distro-sync --skip-unavailable -y --repo='fedora-multimedia' "${OVERRIDES[@]}"
+ dnf5 versionlock add "${OVERRIDES[@]}"
+ 
+@@ -49,6 +58,10 @@ readarray -t FEDORA_PACKAGES < <($READ_PKGS "$PKGS_TOML" fedora)
+ readarray -t _ver_pkgs < <($READ_PKGS "$PKGS_TOML" "fedora_v${FEDORA_MAJOR_VERSION}" 2>/dev/null || true)
+ FEDORA_PACKAGES+=("${_ver_pkgs[@]}")
+ 
++# Architecture-specific additions (e.g. the arch's grub2 EFI cdboot payload)
++readarray -t _arch_pkgs < <($READ_PKGS "$PKGS_TOML" "fedora_${ARCH}" 2>/dev/null || true)
++FEDORA_PACKAGES+=("${_arch_pkgs[@]}")
++
+ # Install Fedora, Tailscale, and multimedia packages together while keeping COPR packages isolated.
+ echo "Installing ${#FEDORA_PACKAGES[@]} Fedora packages plus Tailscale and multimedia packages..."
+ dnf5 config-manager addrepo --from-repofile=https://pkgs.tailscale.com/stable/fedora/tailscale.repo
+@@ -68,6 +81,8 @@ copr_install_isolated "ublue-os/packages" \
+ # Packages to exclude — conflicts with or replaced by image content
+ # shellcheck disable=SC2034  # passed by name to remove_excluded_packages
+ readarray -t EXCLUDED_PACKAGES < <($READ_PKGS "$PKGS_TOML" excluded)
++readarray -t _arch_excluded < <($READ_PKGS "$PKGS_TOML" "excluded_${ARCH}" 2>/dev/null || true)
++EXCLUDED_PACKAGES+=("${_arch_excluded[@]}")
+ remove_excluded_packages EXCLUDED_PACKAGES
+ 
+ ## Pins and Overrides
+diff --git a/upstream/build_files/base/20-tests.sh b/upstream/build_files/base/20-tests.sh
+index 3b127fe..9bd5986 100755
+--- a/upstream/build_files/base/20-tests.sh
++++ b/upstream/build_files/base/20-tests.sh
+@@ -38,7 +38,6 @@ IMPORTANT_PACKAGES=(
+     firefox
+     fish
+     flatpak
+-    grub2-efi-x64-cdboot
+     isomd5sum
+     libblockdev-btrfs
+     libblockdev-dm
+@@ -60,6 +59,12 @@ IMPORTANT_PACKAGES=(
+     zsh
+ )
+ 
++# The grub2 EFI cdboot payload is arch-specific; assert the one for this arch.
++case "$(uname -m)" in
++    x86_64) IMPORTANT_PACKAGES+=(grub2-efi-x64-cdboot) ;;
++    aarch64) IMPORTANT_PACKAGES+=(grub2-efi-aa64-cdboot) ;;
++esac
++
+ for package in "${IMPORTANT_PACKAGES[@]}"; do
+     rpm -q "${package}" >/dev/null || { echo "Missing package: ${package}... Exiting"; exit 1 ; }
+ done
+diff --git a/upstream/build_files/packages/base.toml b/upstream/build_files/packages/base.toml
+index e05f965..62712f1 100644
+--- a/upstream/build_files/packages/base.toml
++++ b/upstream/build_files/packages/base.toml
+@@ -8,17 +8,23 @@
+ #   [fedora_v43]             additions for Fedora 43 only
+ #   [fedora_v44]             additions for Fedora 44 only
+ #   [excluded]               packages removed from the base image
++#
++# Architecture-specific sections are optional and are merged on top of their
++# base section when `uname -m` matches the suffix, mirroring the `_v44`
++# version-suffix convention above:
++#
++#   [multimedia_overrides_x86_64] / [multimedia_overrides_aarch64]
++#   [fedora_x86_64]               / [fedora_aarch64]
++#   [excluded_x86_64]             / [excluded_aarch64]
+ 
+ [multimedia_overrides]
++# Arch-neutral overrides. Arch-specific GPU stacks live in the
++# [multimedia_overrides_<arch>] sections below.
+ # Replace mesa and friends with less-crippled versions from negativo17/fedora-multimedia.
+ # Versions are pinned with `dnf5 versionlock` after install.
+ packages = [
+-    "intel-gmmlib",
+-    "intel-mediasdk",
+-    "intel-vpl-gpu-rt",
+     "libheif",
+     "libva",
+-    "libva-intel-media-driver",
+     "mesa-dri-drivers",
+     "mesa-filesystem",
+     "mesa-libEGL",
+@@ -27,6 +33,15 @@ packages = [
+     "mesa-vulkan-drivers",
+ ]
+ 
++[multimedia_overrides_x86_64]
++# Intel GPU media stack — x86_64 only, not built for aarch64 by negativo17.
++packages = [
++    "intel-gmmlib",
++    "intel-mediasdk",
++    "intel-vpl-gpu-rt",
++    "libva-intel-media-driver",
++]
++
+ [fedora]
+ # Base packages from Fedora repos — common to all supported Fedora versions.
+ packages = [
+@@ -52,7 +67,6 @@ packages = [
+     "gnome-ponytail-daemon",
+     "gnome-tweaks",
+     "google-noto-sans-cjk-vf-fonts",
+-    "grub2-efi-x64-cdboot",
+     "gum",
+     "gvfs-nfs",
+     "ibus-mozc",
+@@ -93,6 +107,17 @@ packages = [
+     "zsh",
+ ]
+ 
++[fedora_x86_64]
++# EFI bootloader payload for x86_64. The aarch64 equivalent is in [fedora_aarch64].
++packages = [
++    "grub2-efi-x64-cdboot",
++]
++
++[fedora_aarch64]
++packages = [
++    "grub2-efi-aa64-cdboot",
++]
++
+ [fedora_v42]
+ # TODO: remove when F42 is dropped
+ packages = [
