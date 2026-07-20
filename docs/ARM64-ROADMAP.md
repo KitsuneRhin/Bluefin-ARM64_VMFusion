@@ -1,0 +1,235 @@
+# BlueSilicon — aarch64 Bluefin for Apple Silicon VMs
+
+Target: a **Bluefin base** image for `linux/arm64`, built natively in CI, delivered as a
+bootable disk image to run in **VMware Fusion** on an Apple Silicon Mac. No x86 emulation
+anywhere in the build or the runtime. `dx` follows once base boots.
+
+Decisions taken: vendor upstream `build_files`/`system_files` via **git subtree**; CI
+publishes both the container **and** a downloadable disk image; **base first, dx second**.
+
+Upstream Bluefin facts referenced throughout are recorded in
+[BLUEFIN-REFERENCE.md](BLUEFIN-REFERENCE.md) — registry digests, the reusable actions
+catalogue, and the upstream build pattern.
+
+The Surface project (SurfaceBlue) is a separate concern, parked pending linux-surface
+kernel 7.x patches. Its roadmap stays in that repository.
+
+---
+
+## 0. Feasibility — verified 2026-07-20
+
+Every layer of the stack was checked against live registries, not assumed.
+
+| Component | arm64 status | How verified |
+|---|---|---|
+| `quay.io/fedora-ostree-desktops/silverblue:44` | ✅ multi-arch index | OCI index lists `linux/amd64`, `linux/arm64` |
+| `ghcr.io/projectbluefin/common:latest` | ✅ | index lists both |
+| `ghcr.io/ublue-os/brew:latest` | ✅ | index lists both |
+| COPR `ublue-os/packages` | ✅ | `fedora-44-aarch64` chroot present |
+| COPR `ublue-os/staging` | ✅ | `fedora-44-aarch64` chroot present |
+| negativo17 `multimedia/fedora-44/aarch64` | ✅ | 556 aarch64 RPMs |
+| Tailscale | ✅ | `stable/fedora/aarch64/repodata/repomd.xml` → 200 |
+| `bootc-image-builder` | ✅ | index lists arm64 |
+| GitHub `ubuntu-24.04-arm` runners | ✅ | GA Aug 2025, free on public repos |
+| `build_files/base/03-packages.sh` | ✅ | contains zero arch conditionals |
+
+**The Homebrew layer was the main risk and it clears.** Homebrew upstream does not support
+ARM64 Linux, but ublue publishes an arm64 `brew` image, so the layer composes.
+
+### 0.1 The structural catch
+
+`projectbluefin/bluefin:stable` and `bluefin-lts:stable` are both **amd64-only** (confirmed
+via config blob `architecture: amd64`). There is no arm64 Bluefin to layer onto.
+
+So unlike the Surface project — where we layer on a published Bluefin image and inherit
+their maintenance — here we **run Bluefin's build ourselves** from Silverblue arm64. We
+track their `build_files/`, not their image. When they restructure their build, we feel it.
+That is the dominant ongoing cost of this project; size it honestly.
+
+Encouraging signal: `common` and `brew` are already arm64 while Bluefin is not. Someone
+upstream is laying arm64 groundwork on purpose. Upstreaming is a realistic endgame, and
+§4 is written to keep that door open.
+
+### 0.2 What gets *deleted* on arm64
+
+`ghcr.io/ublue-os/akmods` is amd64-only. The entire kernel-swap step —
+`04-install-kernel-akmods.sh`, the hairiest script in Bluefin's build — **does not run**.
+We keep Fedora's stock aarch64 kernel.
+
+Dropped with it: ZFS, v4l2loopback, NVIDIA, Secure Boot / MOK signing. All meaningless in
+a Mac VM. The thing that made the Surface project expensive is simply absent here.
+
+`19-initramfs.sh` still runs (ostree dracut config), but with no `--kver` juggling, since
+we never replace the kernel.
+
+---
+
+## 1. Concrete arch landmines already identified
+
+These are known-broken *before* the first build. Fix them in the arm64 patch set.
+
+### 1.1 `build_files/packages/base.toml`
+
+The manifest has sections for `[fedora]`, `[fedora_v42..44]`, `[excluded]`,
+`[multimedia_overrides]` — but **no arch sections at all**. Confirmed offenders:
+
+- **`grub2-efi-x64-cdboot`** — x86_64-only. aarch64 needs `grub2-efi-aa64-cdboot`.
+  This is a hard build failure.
+- **`[multimedia_overrides]`** is largely Intel GPU stack: `intel-gmmlib`,
+  `intel-mediasdk`, `intel-vpl-gpu-rt`, `libva-intel-media-driver`. x86_64-only.
+  The generic `mesa-*` entries in that section are fine on aarch64 and worth keeping.
+- **`igt-gpu-tools`** — verify aarch64 availability; drop if absent.
+
+**Recommended fix (upstreamable):** extend `build_files/shared/read-packages` and
+`03-packages.sh` to understand `[fedora_aarch64]`, `[fedora_x86_64]`, and
+`[excluded_aarch64]` sections, keyed off `$(uname -m)`. This is a small, well-scoped
+change that mirrors the existing `_v44` version-suffix convention. Prefer it over forking
+`base.toml` wholesale — a forked manifest diverges immediately and forever.
+
+### 1.2 `21-container-native-iso.sh` — drop entirely
+
+Fetches `ublue-os/akmods/certs/public_key.der` into `/etc/sb_pubkey.der` for Secure Boot,
+and builds the Titanoboa live-ISO contract. Both are x86-oriented and irrelevant to a VM
+image. Remove from the Containerfile.
+
+### 1.3 Flatpaks
+
+Flathub aarch64 coverage is per-app and thinner than x86_64. Bluefin preinstalls a set;
+expect some to fail resolution. Detection is trivial (build fails), fix is trimming.
+Budget one iteration cycle for this; do not try to predict it in advance.
+
+### 1.4 GNOME extensions stage
+
+`extension-builder` installs `glib2-devel meson sassc cmake dbus-devel` and compiles
+schemas — all arch-neutral. Expected to work unchanged. Verify, don't pre-emptively patch.
+
+---
+
+## 2. Repository layout
+
+New repo (suggested `bluesilicon`), **not** this one. SurfaceBlue stays parked and its
+git history stays about Surface.
+
+```
+Containerfile                  # arm64, FROM silverblue:44 (digest-pinned, arm64)
+upstream/                      # git subtree of projectbluefin/bluefin
+  build_files/
+  system_files/
+  image-versions.yml
+patches/                       # arm64 patch set applied over the subtree
+  0001-arch-aware-package-manifest.patch
+  0002-skip-akmods-on-aarch64.patch
+  0003-drop-container-native-iso.patch
+.github/workflows/
+  build.yml                    # ubuntu-24.04-arm
+  disk.yml                     # qcow2 via bootc-image-builder
+  upstream-sync.yml            # subtree pull + drift PR
+docs/
+```
+
+### 2.1 Subtree discipline
+
+- `git subtree add --prefix=upstream https://github.com/projectbluefin/bluefin main --squash`
+- `upstream-sync.yml` runs weekly: `git subtree pull`, reapply `patches/`, open a PR on
+  change. **Never edit `upstream/` directly** — that is what makes drift legible and
+  upstreaming possible.
+- If a patch stops applying, the sync PR fails loudly. That is the intended alarm.
+
+---
+
+## 3. Phases
+
+### Phase 1 — Prove the runtime path — ✅ DONE
+
+**Status: complete.** Stock Silverblue aarch64 confirmed running "smooth and functional"
+in **VMware Fusion** on Apple Silicon (2026-07-20). The runtime target is validated, which
+retires the single biggest non-build risk in this project before any code was written.
+
+Consequence for the rest of the plan: the VM host is **VMware Fusion**, not UTM/QEMU. That
+changes the delivery format — see Phase 4.
+
+### Phase 2 — Minimum viable arm64 Bluefin base
+
+Vendor the subtree, apply the three patches from §1, build **locally** on the Mac
+(`podman build --platform linux/arm64`) before touching CI. Iterate on package/Flatpak
+failures here — the loop is far faster than CI.
+
+Order of operations matters: get `03-packages.sh` passing, then Flatpaks, then extensions.
+Do not enable `bootc container lint --fatal-warnings` until the build otherwise succeeds.
+
+**Exit criteria:** an arm64 image that builds clean locally and passes `bootc container lint`.
+
+### Phase 3 — CI
+
+`build.yml` on `ubuntu-24.04-arm` (native, no emulation). Compose from
+`projectbluefin/actions` — the same set catalogued in [ROADMAP.md](ROADMAP.md) §0.6:
+`setup-runner` → `dnf-cache` → build → `generate-tags` → `push-image` → `rechunk` →
+`sign-and-publish` (keyless OIDC) → `scan-image`. Pin each action to a commit SHA.
+
+Note: those actions are written for amd64 Bluefin. Expect at least one to need an arm64
+accommodation — `rechunk` and `scan-image` are the likely candidates. Verify each rather
+than assuming drop-in.
+
+Publish to `ghcr.io/kitsunerhin/bluesilicon:stable`. Single-arch manifest is fine;
+`create-manifest` is only needed if amd64 is ever added.
+
+### Phase 4 — Disk image delivery (VMware Fusion)
+
+`disk.yml`: run `bootc-image-builder --type vmdk --target-arch arm64` against the pushed
+image, attach the result to a GitHub Release. `vmdk` is a first-class
+`bootc-image-builder` output type, so no format conversion step is needed for Fusion.
+
+Emit `qcow2` as a second artifact only if you later want QEMU/UTM as a fallback host. Not
+required for the Fusion path — don't build it by default, the artifacts are multi-GB.
+
+Compress with `zstd` before upload.
+
+Because CI produces the disk, your Mac needs no build tooling: download, import to Fusion,
+boot. Subsequent updates arrive over `bootc upgrade` inside the VM, so the disk image is a
+**one-time bootstrap**, not a recurring download. This is the payoff of the whole
+pipeline — after first boot you never touch a disk artifact again.
+
+Document the Fusion import in `docs/VM-SETUP.md`: UEFI firmware, ≥4 vCPU / 8 GB RAM,
+≥20 GiB disk (matches `disk_config/disk.toml`), and whether `open-vm-tools` needs adding
+to the package manifest for clipboard/resolution integration — **verify this**, it is the
+most likely small gap between "boots" and "pleasant to use". Silverblue may already ship it.
+
+### Phase 5 — dx variant
+
+Second matrix leg once base is stable. `dx` pulls in devcontainer tooling, docker/podman,
+VS Code — more COPR and Flatpak surface, so more aarch64 gaps. Deliberately sequenced last.
+
+### Phase 6 — Upstream (optional, high value)
+
+The `[fedora_aarch64]` manifest patch from §1.1 is genuinely useful to Bluefin
+independently of this project. Offer it upstream. If accepted, our patch set shrinks and
+the subtree drift problem gets structurally smaller.
+
+---
+
+## 4. Risk register
+
+| Risk | Severity | Mitigation |
+|---|---|---|
+| Upstream restructures `build_files/` | **High** | Subtree + patch set; weekly sync PR fails loudly rather than silently drifting |
+| Flatpak aarch64 gaps | Medium | Detected at build time; trim the list. Budget one iteration. |
+| `projectbluefin/actions` assume amd64 | Medium | Verify each action on arm64 in Phase 3; `rechunk`/`scan-image` most suspect |
+| negativo17 Intel-stack overrides | Medium | Already identified §1.1; keep generic mesa, drop Intel-specific |
+| ~~VM graphics performance~~ | ~~Medium~~ | **Retired** — Fusion + Silverblue aarch64 validated 2026-07-20 |
+| Fusion guest integration (clipboard/resize) | Low | Check `open-vm-tools` presence; add to manifest if missing |
+| aarch64 package absent from Fedora | Low | Caught at build; add to `[excluded_aarch64]` |
+| Release storage for disk images | Low | zstd compression; prune old releases |
+
+---
+
+## 5. Why this is the cheaper project
+
+Against the Surface roadmap, on the same stack:
+
+- No kernel building, no patch rebasing, no MOK enrollment, no Secure Boot chain
+- No blocking upstream dependency — every component already ships arm64 **today**
+- Native CI builds, free runners, no emulation
+- Failure modes are build-time and loud, not boot-time and silent
+
+The single genuine cost is subtree drift against a fast-moving upstream. Everything else
+is assembly of parts that already exist.
