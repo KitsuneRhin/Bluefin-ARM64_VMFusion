@@ -1,0 +1,92 @@
+name: Build arm64 base image
+
+# Phase 3 bootstrap workflow. For now this proves the arm64 image builds on a
+# native runner and MEASURES the disk headroom left after the build, so we can
+# decide whether the disk-image (VMDK) step can share this job or needs its own.
+# It does not push or sign yet.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: bluesilicon
+  DEFAULT_TAG: alpha
+
+jobs:
+  build:
+    name: Build image (ubuntu-24.04-arm)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Prepare runner disk
+        uses: ./.github/actions/prepare-disk
+        with:
+          report-label: "after reclaim + relocate (pre-build)"
+
+      - name: Assemble build context
+        run: ./scripts/prepare-context.sh
+
+      - name: Build image
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          BUILD_ARGS=()
+          if [[ -z "$(git status -s)" ]]; then
+            BUILD_ARGS+=("--build-arg" "SHA_HEAD_SHORT=$(git rev-parse --short HEAD)")
+          fi
+          # ghcurl reads the token from the build secret; falls back to
+          # unauthenticated if unset.
+          BUILD_ARGS+=("--secret" "id=GITHUB_TOKEN,env=GITHUB_TOKEN")
+
+          podman build \
+            "${BUILD_ARGS[@]}" \
+            --platform linux/arm64 \
+            --pull=newer \
+            --file Containerfile \
+            --tag "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" \
+            _build_ctx
+
+      - name: Measure disk headroom after build
+        if: always()
+        run: |
+          set -uo pipefail
+          {
+            echo "### Disk: after image build (peak)"
+            echo '```'
+            df -h / /mnt 2>/dev/null
+            echo
+            echo "podman rootless graphroot usage:"
+            du -sh "$(podman info --format '{{.Store.GraphRoot}}')" 2>/dev/null || true
+            echo
+            IMG_SIZE=$(podman images --format '{{.Size}}' "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" 2>/dev/null || echo "n/a")
+            echo "image size: ${IMG_SIZE}"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+          # Free space on /mnt (where the artifacts live), in GiB, for the
+          # split decision. bootc-image-builder + the VMDK need comfortable room.
+          MNT_AVAIL_GB=$(df -BG --output=avail /mnt | tail -1 | tr -dc '0-9')
+          {
+            echo
+            echo "**/mnt available after build: ${MNT_AVAIL_GB} GiB**"
+            echo
+            if [[ "${MNT_AVAIL_GB:-0}" -ge 40 ]]; then
+              echo "→ Comfortable margin for an in-job VMDK build (>=40 GiB)."
+            elif [[ "${MNT_AVAIL_GB:-0}" -ge 25 ]]; then
+              echo "→ Tight but likely workable; a split is the safer choice."
+            else
+              echo "→ Not enough for an in-job VMDK build — split the disk job out."
+            fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"
