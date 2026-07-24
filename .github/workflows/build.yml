@@ -39,18 +39,18 @@ jobs:
         run: ./scripts/prepare-context.sh
 
       - name: Build image
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           BUILD_ARGS=()
           if [[ -z "$(git status -s)" ]]; then
             BUILD_ARGS+=("--build-arg" "SHA_HEAD_SHORT=$(git rev-parse --short HEAD)")
           fi
-          # ghcurl reads the token from the build secret; falls back to
-          # unauthenticated if unset.
-          BUILD_ARGS+=("--secret" "id=GITHUB_TOKEN,env=GITHUB_TOKEN")
 
+          # No GITHUB_TOKEN build secret: ghcurl falls back to unauthenticated,
+          # which is fine here — the base build's only ghcurl GitHub fetch is a
+          # single raw.githubusercontent.com request. Passing --secret would mount
+          # /run/secrets in the committed layer, which no later layer can remove
+          # (buildah keeps it busy), tripping bootc lint's nonempty-run-tmp check.
           podman build \
             "${BUILD_ARGS[@]}" \
             --platform linux/arm64 \

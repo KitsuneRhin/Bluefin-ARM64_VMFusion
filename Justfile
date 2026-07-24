@@ -98,11 +98,11 @@ build $target_image=image_name $tag=default_tag:
         BUILD_ARGS+=("--build-arg" "SHA_HEAD_SHORT=$(git rev-parse --short HEAD)")
     fi
 
-    # GITHUB_TOKEN is optional — ghcurl falls back to unauthenticated requests,
-    # but an authenticated build is far less likely to hit GitHub rate limits.
-    if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-        BUILD_ARGS+=("--secret" "id=GITHUB_TOKEN,env=GITHUB_TOKEN")
-    fi
+    # Intentionally no GITHUB_TOKEN build secret: ghcurl falls back to
+    # unauthenticated (the base build's only ghcurl GitHub call is one
+    # raw.githubusercontent.com fetch). A --secret mount leaves /run/secrets in
+    # the image, which no later layer can remove, tripping bootc lint's
+    # nonempty-run-tmp check. See docs/ARM64-ROADMAP.md §1.1c.
 
     podman build \
         "${BUILD_ARGS[@]}" \

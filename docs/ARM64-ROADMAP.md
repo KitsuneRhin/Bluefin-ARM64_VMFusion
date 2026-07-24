@@ -118,6 +118,26 @@ On aarch64 the package is absent and the erase fails, killing Stage 1.
 Fixed in `patches/0002-tolerate-absent-kernel-devel.patch` by guarding the erase with an
 `rpm -q` check. Worth offering upstream: the guard is correct on x86_64 too.
 
+### 1.1c Build secret trips `bootc lint` `nonempty-run-tmp` — found in CI 2026-07-24
+
+Not arch-related; surfaced only once the build ran in CI with a GITHUB_TOKEN secret.
+Passing `--secret id=GITHUB_TOKEN` mounts it at `/run/secrets/GITHUB_TOKEN`. buildah keeps
+`/run/secrets` mounted for **every** RUN of a secret-enabled build, so no layer can remove
+it (`rm -rf /run/secrets` → `Device or resource busy`), and the empty `/run/secrets`
+directory is committed into the image. `bootc container lint`'s `nonempty-run-tmp` check
+flags it, and `--fatal-warnings` turns that into a build failure. Upstream's
+`clean-stage.sh` tries to clear `/run`, but it runs inside Stage 2 with the secret still
+mounted, so it cannot succeed either.
+
+**Decision: build the base image unauthenticated** (no `--secret`). The token bought almost
+nothing here — the only `ghcurl` GitHub fetch in the base path is a single
+`raw.githubusercontent.com` request (the CoreOS sulogin generator); base/common/brew pulls
+use registry auth, and the extension submodule clones are plain public git. This keeps the
+image `/run` clean and the lint fully enforced (only `--skip nonempty-boot`, matching
+upstream). If a future variant (dx, Phase 5) needs authenticated fetches, revisit with a
+non-`/run` secret target or a post-build check exclusion — do **not** simply re-add
+`--secret` without handling `/run/secrets`.
+
 ### 1.2 `21-container-native-iso.sh` — drop entirely
 
 Fetches `ublue-os/akmods/certs/public_key.der` into `/etc/sb_pubkey.der` for Secure Boot,
