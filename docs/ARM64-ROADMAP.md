@@ -167,6 +167,24 @@ docs/
   upstreaming possible.
 - If a patch stops applying, the sync PR fails loudly. That is the intended alarm.
 
+### 2.2 Submodule discipline (GNOME extensions)
+
+Upstream carries its bundled GNOME Shell extensions as **git submodules** (9 of them,
+under `system_files/shared/usr/share/gnome-shell/extensions/`). `git subtree add` vendors
+the tree but **does not fetch submodule contents** — the directories land empty, and the
+`extension-builder` stage fails at the first `glib-compile-schemas`. This is orthogonal to
+arch; an amd64 subtree build hits it identically.
+
+Handled without touching `upstream/`:
+- `extensions.lock` records `path / url / sha / branch` for each submodule, with the SHA
+  taken from the subtree's gitlink tree entries — so upstream's *exact* pins are reproduced.
+- `scripts/prepare-context.sh` shallow-fetches each pinned SHA into `_build_ctx/` (cached
+  by SHA under `_build_ext_cache/`).
+- After every `git subtree pull`, run `scripts/gen-extensions-lock.sh` to regenerate the
+  lock, then review the diff. **A changed SHA is an upstream extension bump** — the same
+  legible-drift signal the patch set gives for build scripts. Fold this into
+  `upstream-sync.yml` in Phase 3.
+
 ---
 
 ## 3. Phases
@@ -180,16 +198,37 @@ retires the single biggest non-build risk in this project before any code was wr
 Consequence for the rest of the plan: the VM host is **VMware Fusion**, not UTM/QEMU. That
 changes the delivery format — see Phase 4.
 
-### Phase 2 — Minimum viable arm64 Bluefin base
+### Phase 2 — Minimum viable arm64 Bluefin base — ✅ DONE
 
-Vendor the subtree, apply the three patches from §1, build **locally** on the Mac
-(`podman build --platform linux/arm64`) before touching CI. Iterate on package/Flatpak
-failures here — the loop is far faster than CI.
+**Status: complete 2026-07-24.** `localhost/bluesilicon:alpha` builds clean via
+`podman build --platform linux/arm64` and passes `bootc container lint --fatal-warnings
+--skip nonempty-boot` (12 passed, 2 skipped). 7.92 GB, `architecture: arm64`.
 
-Order of operations matters: get `03-packages.sh` passing, then Flatpaks, then extensions.
-Do not enable `bootc container lint --fatal-warnings` until the build otherwise succeeds.
+Verified inside the built image: `aarch64` throughout; `grub2-efi-aa64-cdboot` present and
+x64 absent; stock Fedora `kernel-core-7.1.4-200.fc44.aarch64` with a generated 236 MB
+initramfs (dracut ran in Stage 2, no kernel swap); no akmods, no kernel-devel;
+`igt-gpu-tools` kept; Intel GPU stack absent; mesa sourced from negativo17; all 9 GNOME
+extensions present and compiled.
 
-**Exit criteria:** an arm64 image that builds clean locally and passes `bootc container lint`.
+What it took beyond the roadmap's three §1 fixes:
+- Two extra landmines, both now patched — see §1.1a (`20-tests.sh` bootloader assertion)
+  and §1.1b (`kernel-devel` erase). Each would have cost a full build cycle to discover.
+- The GNOME extensions are upstream **git submodules** the subtree does not fetch. Handled
+  via `extensions.lock` + a fetch step in `scripts/prepare-context.sh`. See §2.2.
+- **No Flatpak failures surfaced.** The roadmap budgeted an iteration for aarch64 Flatpak
+  gaps (§1.3); none occurred in the base image. `open-vm-tools` question (Phase 4) still open.
+
+Build mechanics: `upstream/` is a pristine subtree; `scripts/prepare-context.sh` assembles
+`_build_ctx/` from it plus `patches/` plus the fetched extensions; `just build` wraps this.
+
+**Cache-split wrinkle to resolve in Phase 3.** Reference §5's two-stage split is preserved
+structurally, but empirically a `system_files`-only change (e.g. an extension bump) busts
+Stage 1's cache too: both stages bind-mount `from=ctx`, and the single `ctx` scratch stage
+COPYs *both* `build_files` and `system_files`, so any `system_files` change rebuilds `ctx`
+and invalidates Stage 1's package layer — the exact 20–80 min hit the split was meant to
+avoid. Fix is to split `ctx` into `ctx-build` (build_files only) and `ctx-system`, and have
+Stage 1 bind only `ctx-build`. Deferred: it's a CI-time optimization, and it deviates from
+upstream's Containerfile so it needs weighing against subtree drift. Flagged, not yet done.
 
 ### Phase 3 — CI
 
@@ -244,7 +283,9 @@ the subtree drift problem gets structurally smaller.
 | Risk | Severity | Mitigation |
 |---|---|---|
 | Upstream restructures `build_files/` | **High** | Subtree + patch set; weekly sync PR fails loudly rather than silently drifting |
-| Flatpak aarch64 gaps | Medium | Detected at build time; trim the list. Budget one iteration. |
+| Upstream bumps/adds extension submodules | Medium | `gen-extensions-lock.sh` after each sync; SHA diff is the signal (§2.2) |
+| ~~Flatpak aarch64 gaps~~ | ~~Medium~~ | **Retired for base** — no Flatpak failures in the base build (2026-07-24). Re-open for `dx` (Phase 5). |
+| Extension bump triggers full package rebuild in CI | Low | Cache-split wrinkle, see Phase 3 note; split `ctx` scratch stage to fix |
 | `projectbluefin/actions` assume amd64 | Medium | Verify each action on arm64 in Phase 3; `rechunk`/`scan-image` most suspect |
 | negativo17 Intel-stack overrides | Medium | Already identified §1.1; keep generic mesa, drop Intel-specific |
 | ~~VM graphics performance~~ | ~~Medium~~ | **Retired** — Fusion + Silverblue aarch64 validated 2026-07-20 |
