@@ -12,6 +12,9 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CTX="${1:-${REPO_ROOT}/_build_ctx}"
+# Persistent bare-ish cache of fetched extension SHAs, reused across context
+# rebuilds. Gitignored (_build_* prefix). Override with EXT_CACHE.
+EXT_CACHE="${EXT_CACHE:-${REPO_ROOT}/_build_ext_cache}"
 
 cd "$REPO_ROOT"
 
@@ -47,5 +50,45 @@ for p in "${patchset[@]}"; do
         exit 1
     fi
 done
+
+# Materialise the bundled GNOME Shell extensions. Upstream carries these as git
+# submodules, which the subtree does not fetch (their dirs land empty). We fetch
+# each pinned SHA recorded in extensions.lock into the context. Arch-neutral —
+# this same step would be required for an amd64 subtree build.
+echo "==> Fetching GNOME extension submodules (extensions.lock)"
+if [[ ! -f extensions.lock ]]; then
+    echo "error: extensions.lock missing. Run scripts/gen-extensions-lock.sh" >&2
+    exit 1
+fi
+
+EXT_ROOT="$CTX/system_files/shared"
+mkdir -p "$EXT_CACHE"
+
+while IFS=$'\t' read -r relpath url sha branch; do
+    [[ -z "$relpath" || "$relpath" == \#* ]] && continue
+    dest="$EXT_ROOT/$relpath"
+    # Cache keyed by sha so an upstream bump fetches fresh but rebuilds reuse.
+    cache="$EXT_CACHE/$sha"
+    if [[ ! -d "$cache" ]]; then
+        echo "    fetch ${relpath##*/} @ ${sha:0:12}"
+        tmp="${cache}.tmp.$$"
+        rm -rf "$tmp"; mkdir -p "$tmp"
+        git -C "$tmp" init -q
+        git -C "$tmp" remote add origin "$url"
+        # GitHub allows fetching a reachable SHA directly; fall back to the
+        # branch tip + checkout if a server refuses by-SHA fetches.
+        if ! git -C "$tmp" fetch -q --depth 1 origin "$sha" 2>/dev/null; then
+            [[ -n "$branch" ]] && git -C "$tmp" fetch -q --depth 1 origin "$branch"
+        fi
+        git -C "$tmp" checkout -q "$sha"
+        rm -rf "$tmp/.git"
+        mv "$tmp" "$cache"
+    else
+        echo "    cached ${relpath##*/} @ ${sha:0:12}"
+    fi
+    mkdir -p "$(dirname "$dest")"
+    rm -rf "$dest"
+    cp -R "$cache" "$dest"
+done <extensions.lock
 
 echo "==> Context ready: ${CTX}"
