@@ -1,9 +1,9 @@
 name: Build arm64 base image
 
-# Phase 3 bootstrap workflow. For now this proves the arm64 image builds on a
-# native runner and MEASURES the disk headroom left after the build, so we can
-# decide whether the disk-image (VMDK) step can share this job or needs its own.
-# It does not push or sign yet.
+# Phase 3/4 workflow. Builds the arm64 image on a native runner, then converts
+# it to a VMware Fusion VMDK with bootc-image-builder and uploads it as a
+# downloadable artifact for manual import + boot testing. No registry push,
+# signing, or release yet — that comes once the runtime path is validated.
 
 on:
   push:
@@ -20,10 +20,12 @@ concurrency:
 env:
   IMAGE_NAME: bluesilicon
   DEFAULT_TAG: alpha
+  # bootc-image-builder, pinned to its arm64 child manifest (verified 2026-07-24).
+  BIB_IMAGE: "quay.io/centos-bootc/bootc-image-builder@sha256:a4779fc2307a7c2e82fda09e5c7712871fdb2dfae8a587f61d1dab32e7c4edc8"
 
 jobs:
   build:
-    name: Build image (ubuntu-24.04-arm)
+    name: Build image + VMDK (ubuntu-24.04-arm)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     steps:
@@ -59,34 +61,92 @@ jobs:
             --tag "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" \
             _build_ctx
 
-      - name: Measure disk headroom after build
+      - name: Measure disk headroom after image build
         if: always()
         run: |
           set -uo pipefail
           {
-            echo "### Disk: after image build (peak)"
+            echo "### Disk: after image build"
             echo '```'
-            df -h / /mnt 2>/dev/null
-            echo
-            echo "podman rootless graphroot usage:"
-            du -sh "$(podman info --format '{{.Store.GraphRoot}}')" 2>/dev/null || true
-            echo
+            df -h / 2>/dev/null
             IMG_SIZE=$(podman images --format '{{.Size}}' "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" 2>/dev/null || echo "n/a")
             echo "image size: ${IMG_SIZE}"
+            echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
-          # Free space on /mnt (where the artifacts live), in GiB, for the
-          # split decision. bootc-image-builder + the VMDK need comfortable room.
-          MNT_AVAIL_GB=$(df -BG --output=avail /mnt | tail -1 | tr -dc '0-9')
+      # bootc-image-builder must run rootful + privileged. Bridge the rootless
+      # image into rootful storage via a save|load pipe (no temp file, more
+      # robust than podman image scp across the rootless/rootful boundary).
+      - name: Load image into rootful storage
+        run: |
+          set -euo pipefail
+          podman save "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" | sudo podman load
+          sudo podman images "localhost/${IMAGE_NAME}"
+
+      - name: Build VMDK (bootc-image-builder)
+        run: |
+          set -euo pipefail
+          STORAGE=$(sudo podman info --format json | jq -r '.store.graphRoot')
+          echo "rootful graphroot: ${STORAGE}"
+          mkdir -p output
+
+          sudo podman run --rm --privileged --net=host \
+            --pull=newer \
+            --security-opt label=type:unconfined_t \
+            -v "$(pwd)/disk_config/disk.toml:/config.toml:ro" \
+            -v "$(pwd)/output:/output" \
+            -v "${STORAGE}:/var/lib/containers/storage" \
+            "${BIB_IMAGE}" \
+            --type vmdk \
+            --use-librepo=True \
+            --rootfs btrfs \
+            "localhost/${IMAGE_NAME}:${DEFAULT_TAG}"
+
+          sudo chown -R "$(id -u):$(id -g)" output
+          echo "=== bib output tree:"
+          find output -type f -exec ls -lh {} +
+
+      - name: Report disk after VMDK
+        if: always()
+        run: |
           {
-            echo
-            echo "**/mnt available after build: ${MNT_AVAIL_GB} GiB**"
-            echo
-            if [[ "${MNT_AVAIL_GB:-0}" -ge 40 ]]; then
-              echo "→ Comfortable margin for an in-job VMDK build (>=40 GiB)."
-            elif [[ "${MNT_AVAIL_GB:-0}" -ge 25 ]]; then
-              echo "→ Tight but likely workable; a split is the safer choice."
-            else
-              echo "→ Not enough for an in-job VMDK build — split the disk job out."
-            fi
+            echo "### Disk: after VMDK build"
+            echo '```'
+            df -h / 2>/dev/null
+            echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Compress VMDK + checksum
+        id: pack
+        run: |
+          set -euo pipefail
+          VMDK=$(find output -name '*.vmdk' | head -1)
+          if [[ -z "${VMDK}" ]]; then
+            echo "no .vmdk produced under output/" >&2
+            find output -type f >&2
+            exit 1
+          fi
+          SHORT=$(git rev-parse --short HEAD)
+          OUT="${IMAGE_NAME}-${DEFAULT_TAG}-${SHORT}.aarch64.vmdk.zst"
+          echo "compressing ${VMDK} ($(du -h "${VMDK}" | cut -f1)) → ${OUT}"
+          zstd -T0 -19 "${VMDK}" -o "${OUT}"
+          sha256sum "${OUT}" > "${OUT}.sha256"
+          ls -lh "${OUT}" "${OUT}.sha256"
+          {
+            echo "### VMDK artifact"
+            echo '```'
+            cat "${OUT}.sha256"
+            echo "compressed size: $(du -h "${OUT}" | cut -f1)"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "artifact=${OUT}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload VMDK artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ env.IMAGE_NAME }}-vmdk
+          path: |
+            ${{ steps.pack.outputs.artifact }}
+            ${{ steps.pack.outputs.artifact }}.sha256
+          retention-days: 14
+          if-no-files-found: error
