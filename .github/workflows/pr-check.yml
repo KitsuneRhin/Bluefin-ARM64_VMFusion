@@ -1,0 +1,37 @@
+name: PR check
+
+# Fast required gate for pull requests into main: assemble the context and build
+# the arm64 image, which runs `bootc container lint` as its final Containerfile
+# step. No VMDK, no disk-prep — an image-only build fits in the runner's baseline
+# free space and finishes in ~6 min. The heavy VMDK build lives in build.yml on dev.
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: pr-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: build + lint (arm64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Assemble build context
+        run: ./scripts/prepare-context.sh
+
+      - name: Build image (runs bootc lint)
+        run: |
+          set -euo pipefail
+          podman build \
+            --platform linux/arm64 \
+            --pull=newer \
+            --file Containerfile \
+            --tag "localhost/bluesilicon:pr-${{ github.event.number || 'dispatch' }}" \
+            _build_ctx

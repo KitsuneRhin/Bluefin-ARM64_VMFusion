@@ -4,10 +4,14 @@ name: Build arm64 base image
 # it to a VMware Fusion VMDK with bootc-image-builder and uploads it as a
 # downloadable artifact for manual import + boot testing. No registry push,
 # signing, or release yet — that comes once the runtime path is validated.
+#
+# Triggers on `dev`, not `main`: the VMDK step is still being brought up, so it
+# runs where that work happens. `main` is gated by the fast pr-check.yml instead.
+# Once the VMDK path is green, add `main` back here (or add publish steps).
 
 on:
   push:
-    branches: [main]
+    branches: [dev]
     paths-ignore:
       - "docs/**"
       - "**/*.md"
