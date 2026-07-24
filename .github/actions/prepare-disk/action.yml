@@ -1,14 +1,15 @@
 name: "Prepare runner disk"
 description: >
-  Free up space on a GitHub-hosted runner and relocate podman storage onto the
-  large /mnt scratch disk, then report the resulting free space. Reclaim first,
-  relocate second — see docs/ARM64-ROADMAP.md Phase 3.
+  Free up space on a GitHub-hosted runner and report the result. On
+  ubuntu-24.04-arm there is a single ~145 GB root disk (no separate /mnt
+  volume), so relocating podman storage buys nothing — reclaiming is what frees
+  space. See docs/ARM64-ROADMAP.md Phase 3.
 
 inputs:
   report-label:
     description: "Label to tag the disk report with in the step summary."
     required: false
-    default: "after prepare-disk"
+    default: "after reclaim"
 
 runs:
   using: "composite"
@@ -18,11 +19,18 @@ runs:
       run: |
         echo "### Disk: baseline (before reclaim)" >> "$GITHUB_STEP_SUMMARY"
         echo '```' >> "$GITHUB_STEP_SUMMARY"
-        df -h / /mnt 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY"
+        df -h / 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY"
         echo '```' >> "$GITHUB_STEP_SUMMARY"
 
     # Reclaim first and foremost. Pinned to v1.3.1. The action rm -rf's each
     # target with `|| true`, so absent paths on arm64 are skipped harmlessly.
+    #
+    # NOTE: we do NOT relocate podman storage. These runners have one root disk
+    # (/mnt is a directory on it, not a separate volume), so a move frees nothing
+    # — and relocating rootful storage baked the /mnt path into the libpod DB,
+    # which then mismatched bootc-image-builder's default /var/lib/containers
+    # mount ("database configuration mismatch"). Default storage paths keep the
+    # host and the bib container in agreement.
     - name: Reclaim space
       uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
       with:
@@ -34,48 +42,10 @@ runs:
         docker-images: true
         swap-storage: true
 
-    # Relocate podman storage onto /mnt (the large, near-empty scratch disk) for
-    # good measure, so the multi-GB image layers never land on the small / disk.
-    # Both rootless (image build) and rootful (bootc-image-builder) are covered.
-    - name: Relocate podman storage to /mnt
-      shell: bash
-      run: |
-        set -euo pipefail
-
-        # Rootful storage (used by bootc-image-builder via sudo podman)
-        sudo mkdir -p /mnt/podman-rootful/storage /mnt/podman-rootful/run
-        sudo mkdir -p /etc/containers
-        sudo tee /etc/containers/storage.conf >/dev/null <<'EOF'
-        [storage]
-        driver = "overlay"
-        graphroot = "/mnt/podman-rootful/storage"
-        runroot = "/mnt/podman-rootful/run"
-        EOF
-
-        # Rootless storage (used by the image build). A per-user override wins
-        # over the system config above.
-        sudo mkdir -p /mnt/podman-rootless
-        sudo chown -R "$(id -u):$(id -g)" /mnt/podman-rootless
-        mkdir -p /mnt/podman-rootless/storage /mnt/podman-rootless/run
-        mkdir -p "$HOME/.config/containers"
-        tee "$HOME/.config/containers/storage.conf" >/dev/null <<'EOF'
-        [storage]
-        driver = "overlay"
-        graphroot = "/mnt/podman-rootless/storage"
-        runroot = "/mnt/podman-rootless/run"
-        EOF
-
-        # Force re-init at the new locations (fresh runner: no data to lose).
-        podman system reset --force >/dev/null 2>&1 || true
-        sudo podman system reset --force >/dev/null 2>&1 || true
-
-        echo "Rootless graphroot: $(podman info --format '{{.Store.GraphRoot}}')"
-        echo "Rootful  graphroot: $(sudo podman info --format '{{.Store.GraphRoot}}')"
-
     - name: Disk report (${{ inputs.report-label }})
       shell: bash
       run: |
         echo "### Disk: ${{ inputs.report-label }}" >> "$GITHUB_STEP_SUMMARY"
         echo '```' >> "$GITHUB_STEP_SUMMARY"
-        df -h / /mnt 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY"
+        df -h / 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY"
         echo '```' >> "$GITHUB_STEP_SUMMARY"

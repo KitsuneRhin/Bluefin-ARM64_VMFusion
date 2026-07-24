@@ -39,7 +39,7 @@ jobs:
       - name: Prepare runner disk
         uses: ./.github/actions/prepare-disk
         with:
-          report-label: "after reclaim + relocate (pre-build)"
+          report-label: "after reclaim (pre-build)"
 
       - name: Assemble build context
         run: ./scripts/prepare-context.sh
