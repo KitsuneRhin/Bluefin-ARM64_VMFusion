@@ -136,5 +136,4 @@ RUN rm -rf /opt && ln -s /var/opt /opt
 
 CMD ["/sbin/init"]
 
-# Phase 2 step 5: enable only once the build otherwise succeeds.
-# RUN bootc container lint --fatal-warnings --skip nonempty-boot
+RUN bootc container lint --fatal-warnings --skip nonempty-boot
