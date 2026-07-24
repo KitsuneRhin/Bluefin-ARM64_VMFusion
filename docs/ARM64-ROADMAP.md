@@ -250,7 +250,28 @@ avoid. Fix is to split `ctx` into `ctx-build` (build_files only) and `ctx-system
 Stage 1 bind only `ctx-build`. Deferred: it's a CI-time optimization, and it deviates from
 upstream's Containerfile so it needs weighing against subtree drift. Flagged, not yet done.
 
-### Phase 3 — CI
+### Phase 3 — CI — in progress
+
+**First green CI build 2026-07-24** (`build.yml` on `ubuntu-24.04-arm`, native). The image
+builds and passes `bootc container lint --fatal-warnings` (12 passed, 2 skipped) on a
+hosted arm64 runner. One CI-only fix was needed — the build secret / `nonempty-run-tmp`
+interaction in §1.1c.
+
+**Runner disk — measured, not assumed. No job split needed.** The `ubuntu-24.04-arm`
+runner has a **single 145 GB root disk (~109 GiB free fresh); there is no separate `/mnt`
+volume** — `/mnt` is just a directory on `/`. So the "relocate podman storage to `/mnt`"
+step moves data within the same filesystem and yields no space on this runner (kept anyway:
+harmless, and correct if GitHub ever adds a scratch disk). The reclaim step is what pays —
+`free-disk-space` took free space from 109 → 123 GiB. After a full image build (7.93 GB
+image, 8.9 GB podman store) **113 GiB remained free**. A `bootc-image-builder` VMDK plus
+`rechunk` fits in one job with enormous margin, so Phase 4's disk build can share the runner
+— splitting `disk.yml` out remains a clean-separation choice, not a space necessity.
+
+`.github/actions/prepare-disk` (reclaim → relocate → report) and the instrumented
+`build.yml` implement this. Remaining Phase 3 work: push/sign/publish and the
+`projectbluefin/actions` composition below.
+
+#### Original Phase 3 plan
 
 `build.yml` on `ubuntu-24.04-arm` (native, no emulation). Compose from
 `projectbluefin/actions` — the same set catalogued in [ROADMAP.md](ROADMAP.md) §0.6:
