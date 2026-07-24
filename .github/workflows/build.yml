@@ -133,7 +133,10 @@ jobs:
           SHORT=$(git rev-parse --short HEAD)
           OUT="${IMAGE_NAME}-${DEFAULT_TAG}-${SHORT}.aarch64.vmdk.zst"
           echo "compressing ${VMDK} ($(du -h "${VMDK}" | cut -f1)) → ${OUT}"
-          zstd -T0 -19 "${VMDK}" -o "${OUT}"
+          # Low level on purpose: the disk content is already dense (rpms, fs
+          # metadata), so it compresses only ~1%. High levels waste CPU for no
+          # size gain — see docs/ARM64-ROADMAP.md Phase 4.
+          zstd -T0 -3 "${VMDK}" -o "${OUT}"
           sha256sum "${OUT}" > "${OUT}.sha256"
           ls -lh "${OUT}" "${OUT}.sha256"
           {

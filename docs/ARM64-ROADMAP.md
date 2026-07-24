@@ -205,6 +205,27 @@ Handled without touching `upstream/`:
   legible-drift signal the patch set gives for build scripts. Fold this into
   `upstream-sync.yml` in Phase 3.
 
+### 2.3 Tagging & versioning
+
+Git tags mark checkpoints. Format:
+
+```
+BlueARM_<major.minor.patch>-<variant>-<arch>-<maturity>
+```
+
+- **version** — rolling semver (`0.1.0`, `0.4.56`, …). Iterative, bumped per meaningful
+  checkpoint; not tied to a "full release" v1/v2 scheme.
+- **variant** — `base` | `dx` | …
+- **arch** — `arm64`.
+- **maturity** — how publish-ready the checkpoint is:
+  - `alpha` — builds and passes `bootc lint`, but **not boot-verified**. Not publishable.
+  - `beta` — boots and runs in the target VM; under testing.
+  - `release` — validated end-to-end; ready to publish.
+
+Example: `BlueARM_0.1.0-base-arm64-alpha` (current checkpoint — base builds + lints; VMDK
+builds in CI; boot in Fusion not yet confirmed). The container image tag (`DEFAULT_TAG`,
+currently `alpha`) tracks the same maturity word.
+
 ---
 
 ## 3. Phases
@@ -285,26 +306,34 @@ than assuming drop-in.
 Publish to `ghcr.io/kitsunerhin/bluesilicon:stable`. Single-arch manifest is fine;
 `create-manifest` is only needed if amd64 is ever added.
 
-### Phase 4 — Disk image delivery (VMware Fusion)
+### Phase 4 — Disk image delivery (VMware Fusion) — CI side ✅, boot test pending
 
-`disk.yml`: run `bootc-image-builder --type vmdk --target-arch arm64` against the pushed
-image, attach the result to a GitHub Release. `vmdk` is a first-class
-`bootc-image-builder` output type, so no format conversion step is needed for Fusion.
+**CI produces a VMDK 2026-07-24.** The `build.yml` job (on `dev`) builds the image, bridges
+it into rootful storage, runs `bootc-image-builder --type vmdk --rootfs btrfs` against
+`disk_config/disk.toml`, and uploads a `zstd`-compressed VMDK + `sha256` as a 14-day Actions
+artifact. First green disk build: `bluesilicon-alpha-<sha>.aarch64.vmdk.zst`, ~3.8 GiB
+(3.78 GiB used of the 20 GiB sparse disk). No registry push / signing / Release yet — those
+wait until the runtime path is confirmed. Native arm64 build, so no `--target-arch` needed.
 
-Emit `qcow2` as a second artifact only if you later want QEMU/UTM as a fallback host. Not
-required for the Fusion path — don't build it by default, the artifacts are multi-GB.
+Two things learned building it:
+- **Do not relocate podman storage.** `ubuntu-24.04-arm` has a single root disk (`/mnt` is a
+  directory on it, not a separate volume), so a move frees nothing — and relocating rootful
+  storage baked the `/mnt` path into the libpod DB, which then mismatched bib's default
+  `/var/lib/containers` mount (`database configuration mismatch`). Default paths only.
+- **`open-vm-tools` + `open-vm-tools-desktop` are already installed and `vmtoolsd` is
+  enabled** in the base image (Silverblue default), so the §4 "pleasant to use" gap needs no
+  manifest change. Clipboard/display integration should work on first boot.
+- zstd compresses this disk by only ~1.3% (content is already dense), so the workflow uses a
+  low level (`-3`) — high levels waste CPU for no size gain.
 
-Compress with `zstd` before upload.
+**The remaining gate is manual: does the VMDK boot in Fusion on Apple Silicon?** CI can't
+test that (needs `/dev/kvm` + Fusion firmware). Unverified until booted: the arm64 UEFI boot
+chain under Fusion, and whether Fusion ingests this VMDK subformat directly. Once confirmed,
+merge `dev → main` and cut a `beta` tag (see §2.3). `qcow2` (for QEMU/UTM) stays optional and
+off by default — the artifacts are multi-GB.
 
-Because CI produces the disk, your Mac needs no build tooling: download, import to Fusion,
-boot. Subsequent updates arrive over `bootc upgrade` inside the VM, so the disk image is a
-**one-time bootstrap**, not a recurring download. This is the payoff of the whole
-pipeline — after first boot you never touch a disk artifact again.
-
-Document the Fusion import in `docs/VM-SETUP.md`: UEFI firmware, ≥4 vCPU / 8 GB RAM,
-≥20 GiB disk (matches `disk_config/disk.toml`), and whether `open-vm-tools` needs adding
-to the package manifest for clipboard/resolution integration — **verify this**, it is the
-most likely small gap between "boots" and "pleasant to use". Silverblue may already ship it.
+`docs/VM-SETUP.md` (to write once boot is confirmed): UEFI firmware, ≥4 vCPU / 8 GB RAM,
+≥20 GiB disk, and the Fusion import flow.
 
 ### Phase 5 — dx variant
 
