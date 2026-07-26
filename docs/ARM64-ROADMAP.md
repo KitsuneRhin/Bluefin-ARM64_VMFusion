@@ -361,7 +361,34 @@ Phase 3 remainder (push/sign/publish) or Phase 5 (dx variant).
 Second matrix leg once base is stable. `dx` pulls in devcontainer tooling, docker/podman,
 VS Code — more COPR and Flatpak surface, so more aarch64 gaps. Deliberately sequenced last.
 
-### Phase 6 — Upstream (optional, high value)
+### Phase 6 — Signature enforcement (pre-release gate)
+
+Before promoting any build to `release` maturity, configure the installed image to
+**reject unsigned pulls** from our registry. Currently we sign every push (keyless cosign
+via OIDC) but the system's `/etc/containers/policy.json` is Fedora's default, which does
+not require it.
+
+What this involves (all in `system_files/`, no CI changes needed):
+
+- `/etc/containers/policy.json` — add a `sigstoreSigned` rule scoped to
+  `ghcr.io/kitsunerhin/bluesilicon` with the Fulcio issuer
+  (`https://token.actions.githubusercontent.com`) and the workflow subject
+  (`https://github.com/KitsuneRhin/Bluefin-ARM64_VMFusion/.github/workflows/build.yml@refs/heads/main`).
+- `/etc/pki/sigstore/fulcio_root.crt` and `rekor.pub` — Sigstore root trust bundle.
+- `/etc/containers/registries.d/ghcr-kitsunerhin.yaml` — point at the cosign signature store.
+
+Once in place, `bootc upgrade` will refuse to deploy any image that wasn't signed by our
+GitHub Actions pipeline — closing the loop between §3 signing and actual enforcement.
+
+To manually verify a push before enforcement is in place:
+```bash
+cosign verify \
+  --certificate-identity-regexp="github.com/KitsuneRhin/Bluefin-ARM64_VMFusion" \
+  --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+  ghcr.io/kitsunerhin/bluesilicon:latest
+```
+
+### Phase 7 — Upstream (optional, high value)
 
 The `[fedora_aarch64]` manifest patch from §1.1 is genuinely useful to Bluefin
 independently of this project. Offer it upstream. If accepted, our patch set shrinks and
