@@ -339,11 +339,14 @@ installed system. Once the ISO path validates end-to-end, revisit flat-VMDK via
 `qemu-img convert -f raw -O vmdk -o subformat=monolithicFlat` or `bootc upgrade`-based
 update distribution. Artifact filename switches from `.vmdk.zst` to `.iso.zst`.
 
-**The remaining gate is manual: does the ISO install and boot in Fusion on Apple Silicon?**
-Once confirmed, merge `dev → main` and cut a `beta` tag (see §2.3).
+**ISO boots and installs successfully — 2026-07-26.** Anaconda ISO boots under Fusion on
+Apple Silicon (UEFI + NVMe). Deployment phase at `/run/install/repo/container` takes
+15–40 min with no visible progress bar (silent OCI layer unpack onto the virtual disk);
+this is expected. After reboot, initial GNOME setup ran normally. Full ARM64 boot chain
+confirmed. Tagged `BlueARM_0.1.0-base-arm64-beta`.
 
-`docs/VM-SETUP.md` (to write once boot is confirmed): UEFI firmware, ≥4 vCPU / 8 GB RAM,
-≥20 GiB disk, and the Fusion ISO-boot + install flow.
+Next: merge `dev → main`, write `docs/VM-SETUP.md`, then decide whether to proceed to
+Phase 3 remainder (push/sign/publish) or Phase 5 (dx variant).
 
 ### Phase 5 — dx variant
 
