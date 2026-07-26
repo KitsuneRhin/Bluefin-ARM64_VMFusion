@@ -306,16 +306,16 @@ than assuming drop-in.
 Publish to `ghcr.io/kitsunerhin/bluesilicon:stable`. Single-arch manifest is fine;
 `create-manifest` is only needed if amd64 is ever added.
 
-### Phase 4 — Disk image delivery (VMware Fusion) — CI side ✅, boot test pending
+### Phase 4 — Disk image delivery (VMware Fusion) — in progress
 
 **CI produces a VMDK 2026-07-24.** The `build.yml` job (on `dev`) builds the image, bridges
 it into rootful storage, runs `bootc-image-builder --type vmdk --rootfs btrfs` against
-`disk_config/disk.toml`, and uploads a `zstd`-compressed VMDK + `sha256` as a 14-day Actions
-artifact. First green disk build: `bluesilicon-alpha-<sha>.aarch64.vmdk.zst`, ~3.8 GiB
+`disk_config/disk.toml`, and uploads a `zstd`-compressed artifact + `sha256` as a 14-day
+Actions artifact. First green disk build: `bluesilicon-alpha-<sha>.aarch64.vmdk.zst`, ~3.8 GiB
 (3.78 GiB used of the 20 GiB sparse disk). No registry push / signing / Release yet — those
 wait until the runtime path is confirmed. Native arm64 build, so no `--target-arch` needed.
 
-Two things learned building it:
+Three things learned building it:
 - **Do not relocate podman storage.** `ubuntu-24.04-arm` has a single root disk (`/mnt` is a
   directory on it, not a separate volume), so a move frees nothing — and relocating rootful
   storage baked the `/mnt` path into the libpod DB, which then mismatched bib's default
@@ -323,17 +323,27 @@ Two things learned building it:
 - **`open-vm-tools` + `open-vm-tools-desktop` are already installed and `vmtoolsd` is
   enabled** in the base image (Silverblue default), so the §4 "pleasant to use" gap needs no
   manifest change. Clipboard/display integration should work on first boot.
-- zstd compresses this disk by only ~1.3% (content is already dense), so the workflow uses a
+- **zstd compresses this disk by only ~1.3%** (content is already dense), so the workflow uses a
   low level (`-3`) — high levels waste CPU for no size gain.
 
-**The remaining gate is manual: does the VMDK boot in Fusion on Apple Silicon?** CI can't
-test that (needs `/dev/kvm` + Fusion firmware). Unverified until booted: the arm64 UEFI boot
-chain under Fusion, and whether Fusion ingests this VMDK subformat directly. Once confirmed,
-merge `dev → main` and cut a `beta` tag (see §2.3). `qcow2` (for QEMU/UTM) stays optional and
-off by default — the artifacts are multi-GB.
+**VMDK boot failed 2026-07-26.** VMware Fusion on Apple Silicon rejected the bib-produced
+VMDK as "target image not recognized" and would not boot it. Root cause: bib emits a
+**stream-optimized VMDK** (VMware's transfer/archive format), which Fusion does not treat as
+a directly bootable disk. Fusion expected a flat or sparse monolithic VMDK. Additionally,
+the Fusion NVMe controller assignment did not match the image's EFI boot entries.
+
+**Pivot to Anaconda ISO (2026-07-26).** `--type anaconda-iso` produces a bootable Anaconda
+installer that matches the workflow already known to work (Fedora Silverblue ISO boots in
+Fusion instantly). Boot flow: mount ISO → install to a fresh virtual disk → reboot into
+installed system. Once the ISO path validates end-to-end, revisit flat-VMDK via
+`qemu-img convert -f raw -O vmdk -o subformat=monolithicFlat` or `bootc upgrade`-based
+update distribution. Artifact filename switches from `.vmdk.zst` to `.iso.zst`.
+
+**The remaining gate is manual: does the ISO install and boot in Fusion on Apple Silicon?**
+Once confirmed, merge `dev → main` and cut a `beta` tag (see §2.3).
 
 `docs/VM-SETUP.md` (to write once boot is confirmed): UEFI firmware, ≥4 vCPU / 8 GB RAM,
-≥20 GiB disk, and the Fusion import flow.
+≥20 GiB disk, and the Fusion ISO-boot + install flow.
 
 ### Phase 5 — dx variant
 
