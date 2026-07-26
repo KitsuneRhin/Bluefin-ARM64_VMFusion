@@ -271,7 +271,7 @@ avoid. Fix is to split `ctx` into `ctx-build` (build_files only) and `ctx-system
 Stage 1 bind only `ctx-build`. Deferred: it's a CI-time optimization, and it deviates from
 upstream's Containerfile so it needs weighing against subtree drift. Flagged, not yet done.
 
-### Phase 3 — CI — in progress
+### Phase 3 — CI — ✅ DONE (push/sign/scan)
 
 **First green CI build 2026-07-24** (`build.yml` on `ubuntu-24.04-arm`, native). The image
 builds and passes `bootc container lint --fatal-warnings` (12 passed, 2 skipped) on a
@@ -288,9 +288,17 @@ image, 8.9 GB podman store) **113 GiB remained free**. A `bootc-image-builder` V
 `rechunk` fits in one job with enormous margin, so Phase 4's disk build can share the runner
 — splitting `disk.yml` out remains a clean-separation choice, not a space necessity.
 
-`.github/actions/prepare-disk` (reclaim → relocate → report) and the instrumented
-`build.yml` implement this. Remaining Phase 3 work: push/sign/publish and the
-`projectbluefin/actions` composition below.
+`.github/actions/prepare-disk` (reclaim → report) and the instrumented `build.yml`
+implement this.
+
+**Phase 3 complete 2026-07-26.** `build.yml` now: logs in to GHCR → pushes with an
+immutable SHA tag + a floating branch tag (`latest` on main, `dev` on dev) → signs with
+keyless cosign (OIDC, `sigstore/cosign-installer@v4.1.2`) → scans with Trivy
+(`aquasecurity/trivy-action@v0.36.0`, `continue-on-error: true`, informational for now) →
+builds and uploads the Anaconda ISO artifact. `build.yml` now triggers on both `main` and
+`dev`. Once installed, the VM can update in-place via `sudo bootc upgrade` against
+`ghcr.io/kitsunerhin/bluesilicon:latest`. The `projectbluefin/actions` composition
+(`rechunk`, `scan-image`) is deferred — the custom pipeline covers the same ground.
 
 #### Original Phase 3 plan
 

@@ -1,22 +1,21 @@
 name: Build arm64 base image
 
-# Phase 3/4 workflow. Builds the arm64 image on a native runner, then converts
-# it to a bootable Anaconda installer ISO with bootc-image-builder and uploads
-# it as a downloadable artifact for manual import + boot testing in VMware
-# Fusion. No registry push, signing, or release yet — that comes once the
-# runtime path is validated.
+# Full build pipeline. Builds the arm64 image on a native runner, pushes it to
+# GHCR, signs it with keyless cosign (OIDC), scans it with Trivy, then builds an
+# Anaconda installer ISO with bootc-image-builder and uploads it as a downloadable
+# artifact for manual import + boot testing in VMware Fusion.
 #
-# ISO chosen over VMDK: Fusion on Apple Silicon rejected the bib VMDK
-# (stream-optimized format, not directly bootable). ISO matches the Silverblue
-# workflow the user already knows and boots reliably.
+# Triggers on both `main` and `dev`:
+#   main → pushes :latest to GHCR; the stable channel
+#   dev  → pushes :dev to GHCR; used for pre-merge testing
 #
-# Triggers on `dev`, not `main`: the ISO step is still being brought up, so it
-# runs where that work happens. `main` is gated by the fast pr-check.yml instead.
-# Once the ISO path is green, add `main` back here (or add publish steps).
+# ISO chosen over VMDK: Fusion on Apple Silicon rejected the bib stream-optimized
+# VMDK. Anaconda ISO matches the Silverblue workflow and boots reliably under
+# Fusion (UEFI + NVMe confirmed 2026-07-26).
 
 on:
   push:
-    branches: [dev]
+    branches: [main, dev]
     paths-ignore:
       - "docs/**"
       - "**/*.md"
@@ -29,14 +28,20 @@ concurrency:
 env:
   IMAGE_NAME: bluesilicon
   DEFAULT_TAG: alpha
+  GHCR_IMAGE: ghcr.io/kitsunerhin/bluesilicon
   # bootc-image-builder, pinned to its arm64 child manifest (verified 2026-07-24).
   BIB_IMAGE: "quay.io/centos-bootc/bootc-image-builder@sha256:a4779fc2307a7c2e82fda09e5c7712871fdb2dfae8a587f61d1dab32e7c4edc8"
 
+permissions:
+  contents: read
+  packages: write    # push to GHCR
+  id-token: write    # cosign keyless signing via OIDC
+
 jobs:
   build:
-    name: Build image + ISO (ubuntu-24.04-arm)
+    name: Build image + push + ISO (ubuntu-24.04-arm)
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -82,6 +87,66 @@ jobs:
             echo "image size: ${IMG_SIZE}"
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Log in to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push image to GHCR
+        id: push
+        run: |
+          set -euo pipefail
+          SHORT=$(git rev-parse --short HEAD)
+
+          # Immutable SHA tag — always pushed
+          podman tag "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" "${GHCR_IMAGE}:${SHORT}"
+          podman push "${GHCR_IMAGE}:${SHORT}" --digestfile /tmp/digest.txt
+          DIGEST=$(cat /tmp/digest.txt)
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "ref=${GHCR_IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "sha_tag=${SHORT}" >> "$GITHUB_OUTPUT"
+
+          # Floating branch tag
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            FLOAT_TAG="latest"
+          else
+            FLOAT_TAG="dev"
+          fi
+          podman tag "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" "${GHCR_IMAGE}:${FLOAT_TAG}"
+          podman push "${GHCR_IMAGE}:${FLOAT_TAG}"
+          echo "float_tag=${FLOAT_TAG}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### GHCR push"
+            echo '```'
+            echo "image:  ${GHCR_IMAGE}:${SHORT}"
+            echo "        ${GHCR_IMAGE}:${FLOAT_TAG}"
+            echo "digest: ${DIGEST}"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign image (keyless OIDC)
+        run: |
+          set -euo pipefail
+          # Sign the immutable SHA-tagged digest. The floating tag (latest/dev)
+          # resolves to the same digest, so one signature covers both.
+          cosign sign --yes \
+            "${{ steps.push.outputs.ref }}@${{ steps.push.outputs.digest }}"
+
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        continue-on-error: true
+        with:
+          image-ref: "${{ steps.push.outputs.ref }}:${{ steps.push.outputs.sha_tag }}"
+          format: table
+          exit-code: "0"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
 
       # bootc-image-builder must run rootful + privileged. Bridge the rootless
       # image into rootful storage via a save|load pipe (no temp file, more
