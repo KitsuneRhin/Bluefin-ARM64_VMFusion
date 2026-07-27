@@ -113,6 +113,7 @@ RUN --mount=type=cache,dst=/var/cache/libdnf5 \
     --mount=type=bind,from=ctx,source=/build_files/shared,target=/ctx/build_files/shared \
     --mount=type=bind,from=ctx,source=/build_files/base/00-image-info.sh,target=/ctx/build_files/base/00-image-info.sh \
     --mount=type=bind,from=ctx,source=/build_files/base/17-cleanup.sh,target=/ctx/build_files/base/17-cleanup.sh \
+    --mount=type=bind,from=ctx,source=/build_files/base/18-workarounds.sh,target=/ctx/build_files/base/18-workarounds.sh \
     --mount=type=bind,from=ctx,source=/build_files/base/19-initramfs.sh,target=/ctx/build_files/base/19-initramfs.sh \
     --mount=type=bind,from=ctx,source=/build_files/base/20-tests.sh,target=/ctx/build_files/base/20-tests.sh \
     --mount=type=secret,id=GITHUB_TOKEN \
@@ -125,6 +126,7 @@ RUN --mount=type=cache,dst=/var/cache/libdnf5 \
         /ctx/build_files/base/00-image-info.sh && \
         bash /ctx/build_files/shared/finalize-gnome-extensions.sh && \
         /ctx/build_files/base/17-cleanup.sh && \
+        /ctx/build_files/base/18-workarounds.sh && \
         /ctx/build_files/base/19-initramfs.sh && \
         /ctx/build_files/shared/validate-repos.sh && \
         /ctx/build_files/shared/clean-stage.sh && \
