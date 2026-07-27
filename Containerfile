@@ -21,15 +21,15 @@ ARG BASE_IMAGE_NAME="silverblue"
 ARG FEDORA_MAJOR_VERSION="44"
 ARG BASE_IMAGE="quay.io/fedora-ostree-desktops/silverblue"
 
-# arm64 child manifest digests, all verified live 2026-07-20.
+# arm64 child manifest digests, all verified live 2026-07-27.
 #
 # These are per-arch child digests, not multi-arch index digests, so the arch is
 # explicit and does not depend on podman's platform resolution. Note that
 # upstream's image-versions.yml pins `common` to its *amd64* child manifest —
 # that pin is unusable here and must not be copied over.
-ARG BASE_IMAGE_REF="${BASE_IMAGE}@sha256:d921093409d7fe80d2b03ccbadbedb088f690b21e359859d0068c665e6ff4bf6"
+ARG BASE_IMAGE_REF="${BASE_IMAGE}@sha256:a3cbab99847fa302d881100d2e7da1be2183ad7577f68250b999725054fe63f3"
 ARG COMMON_IMAGE_REF="ghcr.io/projectbluefin/common@sha256:497cb90e7d30e1a93fda67c112b3146fb43e5e64a774301d2d7025cb57d1e90a"
-ARG BREW_IMAGE_REF="ghcr.io/ublue-os/brew@sha256:26fc5b56dad4aafaef39bfd1bee5657204fff31b5fb43c8af3646b3af71b94cf"
+ARG BREW_IMAGE_REF="ghcr.io/ublue-os/brew@sha256:8157460c2d2559ab7e5f2f6644a9c2be3b25fdf8d4a9fd42a34f6a0795eb359e"
 
 # hadolint ignore=DL3006
 FROM ${COMMON_IMAGE_REF} AS common
@@ -135,6 +135,12 @@ RUN --mount=type=cache,dst=/var/cache/libdnf5 \
 
 # Makes `/opt` writeable by default
 RUN rm -rf /opt && ln -s /var/opt /opt
+
+# /var/lib/ is runtime state (not in the ostree commit). systemd-tmpfiles-setup
+# creates this dir on first boot so ublue-system-setup.service can write its
+# json.lock and first-boot hooks can run.
+RUN printf 'd /var/lib/ublue-os 0755 root root -\n' \
+    > /usr/lib/tmpfiles.d/ublue-os-state.conf
 
 CMD ["/sbin/init"]
 
