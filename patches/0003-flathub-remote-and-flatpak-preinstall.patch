@@ -1,8 +1,8 @@
 diff --git a/upstream/build_files/base/17-cleanup.sh b/upstream/build_files/base/17-cleanup.sh
-index f0189b3..2134aa8 100755
+index f0189b3..9b4f316 100755
 --- a/upstream/build_files/base/17-cleanup.sh
 +++ b/upstream/build_files/base/17-cleanup.sh
-@@ -38,9 +38,73 @@ for file in fish htop nvtop; do
+@@ -38,9 +38,93 @@ for file in fish htop nvtop; do
  done
  
  #Add the Flathub Flatpak remote and remove the Fedora Flatpak remote
@@ -23,8 +23,7 @@ index f0189b3..2134aa8 100755
 +# aborts the whole batch on a single bad ref. Transcode them into flatpak
 +# preinstall.d entries so flatpak-preinstall.service (enabled above) applies
 +# them as one transaction, resolving shared runtimes such as org.gnome.Platform
-+# only once. CollectionID is advisory — it resolves against a remote declaring
-+# no collection ID, which is Flathub's current state (verified 2026-07-30).
++# only once.
 +#
 +# The dx set is folded in unconditionally: it is six packages, and carrying a
 +# second image variant to gate them is not worth the build matrix.
@@ -60,10 +59,31 @@ index f0189b3..2134aa8 100755
 +        echo "Skipping ${app}: no aarch64 build available on Flathub"
 +        continue
 +    fi
-+    printf '[Flatpak Preinstall %s]\nBranch=stable\nIsRuntime=false\nCollectionID=org.flathub.Stable\n\n' \
++    printf '[Flatpak Preinstall %s]\nBranch=stable\nIsRuntime=false\n\n' \
 +        "${app}" >>"${FLATPAK_PREINSTALL}"
 +done < <(sed -n 's/^flatpak "\([^"]*\)".*/\1/p' "${FLATPAK_BREWFILES[@]}" | sort -u)
 +echo "Generated $(grep -c '^\[Flatpak Preinstall' "${FLATPAK_PREINSTALL}" || true) Flatpak preinstall entries"
++
++# Deliberately no CollectionID key. flatpak_transaction_add_sync_preinstalled()
++# gates on it:
++#
++#     if (config->collection_id != NULL &&
++#         g_strcmp0 (remote_collection_id, config->collection_id) != 0)
++#       continue;
++#
++# `remote_collection_id` is the remote's *configured* xa.collection-id, not the
++# collection advertised in the remote's summary. Flathub's .flatpakrepo sets no
++# DeployCollectionID, so the configured value is NULL, never matches
++# "org.flathub.Stable", and every remote is skipped — the transaction resolves
++# empty and flatpak reports "Nothing to do" despite finding every ref. Omitting
++# the key leaves collection_id NULL, which bypasses the check and falls through
++# to a normal per-remote lookup. The key is optional: the parser reads it with a
++# NULL error handler in flatpak_get_preinstall_config().
++#
++# Upstream's own bazaar.preinstall sets it, and the parser merges groups by app
++# name across files, so its value would override ours for Bazaar. Strip the key
++# from every file in the directory rather than only omitting it from ours.
++sed -i '/^CollectionID=/d' "${FLATPAK_PREINSTALL_DIR}"/*.preinstall
 +
 +# libsetup.sh's version-script opens
 +# $HOME/.local/share/ublue/setup_versioning.json.lock through a redirect that is
