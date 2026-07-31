@@ -234,9 +234,14 @@ streams plus an immutable per-build tag:
 | Tag | Meaning | Written by |
 |---|---|---|
 | `<short-sha>` | immutable, every build | every push to `dev` / `main` |
-| `:testing` | newest `dev` build; may be broken | CI, automatically |
-| `:stable` | last build verified booting in a VM | manual promotion |
-| `:latest` | alias of `:stable`, for tooling that assumes it exists | manual promotion |
+| `:testing` | newest `dev` build; may be broken | `build.yml`, **`dev` pushes only** |
+| `:stable` | last build verified booting in a VM | `promote.yml`, manual dispatch |
+| `:latest` | alias of `:stable`, for tooling that assumes it exists | `promote.yml`, manual dispatch |
+
+A `main` push publishes its `<short-sha>` tag and the ISO artifact but moves no
+floating stream. `main` lags `dev`, so writing `:testing` from it would drag the
+stream backwards for anyone tracking it, and writing `:stable` from it would mean
+"passed pr-check" rather than "confirmed booting".
 
 **Promotion re-tags a verified digest — it never rebuilds.** A rebuild from the same commit
 can drift (base image, upstream packages, COPR content), so the artifact tested would not be
@@ -255,10 +260,11 @@ no re-signing step.
 Switching streams on an installed VM is a single `bootc switch`, so keeping the streams
 distinct costs the user nothing.
 
-**Not yet implemented.** `build.yml` currently writes `:dev` on the `dev` branch and
-`:latest` on `main`. Renaming `:dev` → `:testing` (it reads as a branch name, not a maturity
-level) and moving `:latest` off automatic `main` builds onto manual promotion are both
-pending — see Phase 5.1.
+**Implemented 2026-07-31.** `build.yml` writes `<short-sha>` always and `:testing` on `dev`
+only; `promote.yml` (workflow_dispatch, takes a short SHA or digest) resolves the input to an
+immutable digest, verifies it was cosign-signed by this pipeline, then copies it to `:stable`
+and optionally `:latest`. Promotion is gated on provenance so `:stable` can never be moved
+onto an image our build workflow did not sign.
 
 ---
 
@@ -401,7 +407,7 @@ VS Code — more COPR and Flatpak surface, so more aarch64 gaps. Deliberately se
 image variant through the build matrix. What remains for a real `dx` leg is the RPM/COPR
 surface (VS Code, devcontainer CLI, docker), not the Flatpaks.
 
-#### 5.1 Installed VM points at the wrong update source — found 2026-07-30
+#### 5.1 Installed VM points at the wrong update source — found 2026-07-30, fixed 2026-07-31
 
 bootc-image-builder stamps the deployment with whatever reference it composed *from*. CI
 composes from the local build tag, so an installed VM reports `localhost/bluesilicon:alpha`
@@ -409,23 +415,25 @@ as its upstream and `bootc upgrade` cannot resolve it. The one-time workaround i
 `bootc switch ghcr.io/kitsunerhin/bluesilicon:<stream>`, which rewrites the recorded source
 permanently — but a freshly installed ISO should never need it.
 
-Two candidate fixes:
+**Resolution.** bootc-image-builder documents no `--target-imgref` and no `--local` flag, so
+overriding the recorded reference at install time was not available. Instead the image is
+re-tagged under its registry reference in rootful storage before bib runs, and bib is invoked
+against that reference:
 
-1. **Compose the ISO from the registry ref.** The GHCR push already runs before the ISO
-   step, so pull the pushed tag back into rootful storage and point bib at
-   `ghcr.io/kitsunerhin/bluesilicon:<stream>` instead of `localhost/…`. Costs one extra pull
-   in CI; the deployment then records the registry ref natively.
-2. **Override the recorded ref at install time.** `bootc install` distinguishes the source
-   image from the target image reference, so composing locally while stamping the registry
-   ref would be cheaper. **Unverified:** whether our pinned bib digest exposes that flag has
-   not been checked — confirm before depending on it.
+```bash
+sudo podman tag "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" "${INSTALL_REF}"
+```
 
-Prefer (1) unless (2) is confirmed. Whichever is used, the stamped ref must match the stream
-that produced the ISO (§2.4): a testing ISO should track `:testing`, not silently follow
-`:stable` on its first upgrade.
+Because the rootful store is already bind-mounted into the bib container, this resolves
+locally and costs no extra pull. The stamped reference follows the stream that produced the
+ISO (§2.4): a `dev` build stamps `:testing`, a `main` build stamps its immutable `<short-sha>`
+tag, so a testing ISO never silently follows `:stable` on its first upgrade.
 
-Do this together with the `:dev` → `:testing` rename, since both touch the same tagging
-logic in `build.yml`.
+Landed together with the `:dev` → `:testing` rename, since both touch the same tagging logic.
+
+**Not yet verified on hardware:** that a VM installed from a post-fix ISO reports the registry
+reference in `bootc status` and can `bootc upgrade` with no `bootc switch` first. Confirm on
+the next clean install.
 
 ### Phase 6 — Signature enforcement (pre-release gate)
 

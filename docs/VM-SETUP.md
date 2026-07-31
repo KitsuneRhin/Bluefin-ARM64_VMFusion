@@ -65,28 +65,50 @@ the system is fully functional.
 
 ---
 
+## Release streams
+
+| Tag | What it is |
+|---|---|
+| `:stable` | Last build booted and verified in a VM. Use this unless you're testing. |
+| `:latest` | Alias of `:stable`, for tooling that assumes `latest` exists. |
+| `:testing` | Newest `dev` build. May be broken; this is where fixes land first. |
+| `<short-sha>` | Immutable, one per build. Use to pin an exact image. |
+
+`:stable` and `:latest` are only moved by a deliberate promotion of an image
+that has actually been booted — they are never written automatically by a build.
+
 ## Updating (after first install)
 
-Once the image is in GHCR you can update in-place without reinstalling.
-In the running VM:
+The ISO stamps its own stream as the update source, so this works with no
+setup. In the running VM:
 
 ```bash
-# Apply the latest image from the registry and stage it for next boot
+# Apply the newest image on the current stream and stage it for next boot
 sudo bootc upgrade
 
 # Reboot into the new deployment
 systemctl reboot
 ```
 
-To switch to a different variant or tag:
+`bootc upgrade` checks the registry, pulls only changed layers, and stages the
+new deployment atomically — if anything goes wrong, roll back with
+`sudo bootc rollback`.
+
+To move between streams:
 
 ```bash
-sudo bootc switch ghcr.io/kitsunerhin/bluesilicon:latest
+sudo bootc switch ghcr.io/kitsunerhin/bluesilicon:stable
 ```
 
-`bootc upgrade` checks the registry, pulls only changed layers, and stages the
-new deployment atomically — if anything goes wrong you can roll back with
-`sudo bootc rollback`.
+Switching rewrites the recorded update source permanently, so subsequent
+`bootc upgrade` calls follow the new stream. To pin an exact build instead, use
+its digest:
+
+```bash
+sudo bootc switch ghcr.io/kitsunerhin/bluesilicon@sha256:<digest>
+```
+
+Check which image a VM is actually running with `sudo bootc status`.
 
 ---
 

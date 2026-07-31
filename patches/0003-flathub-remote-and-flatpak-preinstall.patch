@@ -1,8 +1,8 @@
 diff --git a/upstream/build_files/base/17-cleanup.sh b/upstream/build_files/base/17-cleanup.sh
-index f0189b3..9b4f316 100755
+index f0189b3..f0bed9d 100755
 --- a/upstream/build_files/base/17-cleanup.sh
 +++ b/upstream/build_files/base/17-cleanup.sh
-@@ -38,9 +38,93 @@ for file in fish htop nvtop; do
+@@ -38,9 +38,106 @@ for file in fish htop nvtop; do
  done
  
  #Add the Flathub Flatpak remote and remove the Fedora Flatpak remote
@@ -59,10 +59,23 @@ index f0189b3..9b4f316 100755
 +        echo "Skipping ${app}: no aarch64 build available on Flathub"
 +        continue
 +    fi
-+    printf '[Flatpak Preinstall %s]\nBranch=stable\nIsRuntime=false\n\n' \
-+        "${app}" >>"${FLATPAK_PREINSTALL}"
++
++    # Flathub addons (appstream type "addon") are published under runtime/, not
++    # app/. Declaring IsRuntime=false makes flatpak look up
++    # app/<id>/<arch>/stable, which does not exist; the failing
++    # flatpak_remote_state_lookup_ref() is a bare `continue`, so the ref is
++    # dropped with no error and the unit still exits 0. org.gtk.Gtk3theme.* are
++    # addons by construction — confirmed for adw-gtk3 and adw-gtk3-dark against
++    # the Flathub appstream API on 2026-07-31.
++    is_runtime=false
++    case "${app}" in
++        org.gtk.Gtk3theme.*) is_runtime=true ;;
++    esac
++
++    printf '[Flatpak Preinstall %s]\nBranch=stable\nIsRuntime=%s\n\n' \
++        "${app}" "${is_runtime}" >>"${FLATPAK_PREINSTALL}"
 +done < <(sed -n 's/^flatpak "\([^"]*\)".*/\1/p' "${FLATPAK_BREWFILES[@]}" | sort -u)
-+echo "Generated $(grep -c '^\[Flatpak Preinstall' "${FLATPAK_PREINSTALL}" || true) Flatpak preinstall entries"
++echo "Generated $(grep -c '^\[Flatpak Preinstall' "${FLATPAK_PREINSTALL}" || true) Flatpak preinstall entries ($(grep -c '^IsRuntime=true' "${FLATPAK_PREINSTALL}" || true) as runtimes)"
 +
 +# Deliberately no CollectionID key. flatpak_transaction_add_sync_preinstalled()
 +# gates on it:

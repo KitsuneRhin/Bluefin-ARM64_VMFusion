@@ -6,8 +6,12 @@ name: Build arm64 base image
 # artifact for manual import + boot testing in VMware Fusion.
 #
 # Triggers on both `main` and `dev`:
-#   main → pushes :latest to GHCR; the stable channel
-#   dev  → pushes :dev to GHCR; used for pre-merge testing
+#   dev  → pushes an immutable <short-sha> tag and moves :testing
+#   main → pushes the <short-sha> tag only; no floating stream
+#
+# :stable and :latest are never written here. They are moved by promote.yml
+# against a digest that has actually been booted and verified — see
+# docs/ARM64-ROADMAP.md §2.4 for why promotion re-tags rather than rebuilds.
 #
 # ISO chosen over VMDK: Fusion on Apple Silicon rejected the bib stream-optimized
 # VMDK. Anaconda ISO matches the Silverblue workflow and boots reliably under
@@ -103,7 +107,10 @@ jobs:
           set -euo pipefail
           SHORT=$(git rev-parse --short HEAD)
 
-          # Immutable SHA tag — always pushed
+          # Immutable SHA tag — always pushed, and the only thing a main build
+          # publishes. The :stable and :latest streams are written exclusively
+          # by promote.yml, against a digest that has been booted and verified
+          # (roadmap §2.4).
           podman tag "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" "${GHCR_IMAGE}:${SHORT}"
           podman push "${GHCR_IMAGE}:${SHORT}" --digestfile /tmp/digest.txt
           DIGEST=$(cat /tmp/digest.txt)
@@ -111,22 +118,31 @@ jobs:
           echo "ref=${GHCR_IMAGE}" >> "$GITHUB_OUTPUT"
           echo "sha_tag=${SHORT}" >> "$GITHUB_OUTPUT"
 
-          # Floating branch tag
-          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
-            FLOAT_TAG="latest"
+          # :testing tracks dev only. main must not write it — main lags dev,
+          # so publishing from main would move the stream backwards for anyone
+          # tracking it.
+          if [[ "${{ github.ref }}" == "refs/heads/dev" ]]; then
+            podman tag "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" "${GHCR_IMAGE}:testing"
+            podman push "${GHCR_IMAGE}:testing"
+            FLOAT_TAG="testing"
+            INSTALL_REF="${GHCR_IMAGE}:testing"
           else
-            FLOAT_TAG="dev"
+            FLOAT_TAG="(none — main publishes the SHA tag only)"
+            INSTALL_REF="${GHCR_IMAGE}:${SHORT}"
           fi
-          podman tag "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" "${GHCR_IMAGE}:${FLOAT_TAG}"
-          podman push "${GHCR_IMAGE}:${FLOAT_TAG}"
           echo "float_tag=${FLOAT_TAG}" >> "$GITHUB_OUTPUT"
+
+          # The reference bootc-image-builder composes from, and therefore the
+          # update source stamped into every VM installed from the ISO.
+          echo "install_ref=${INSTALL_REF}" >> "$GITHUB_OUTPUT"
 
           {
             echo "### GHCR push"
             echo '```'
-            echo "image:  ${GHCR_IMAGE}:${SHORT}"
-            echo "        ${GHCR_IMAGE}:${FLOAT_TAG}"
-            echo "digest: ${DIGEST}"
+            echo "image:       ${GHCR_IMAGE}:${SHORT}"
+            echo "stream:      ${FLOAT_TAG}"
+            echo "digest:      ${DIGEST}"
+            echo "ISO tracks:  ${INSTALL_REF}"
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
@@ -159,7 +175,18 @@ jobs:
         run: |
           set -euo pipefail
           podman save "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" | sudo podman load
-          sudo podman images "localhost/${IMAGE_NAME}"
+
+          # bootc-image-builder stamps the deployment with whatever reference it
+          # composed from. Composing from localhost/… produced VMs that reported
+          # localhost/bluesilicon:alpha as their update source and could not
+          # `bootc upgrade` without a manual `bootc switch` first (roadmap §5.1).
+          # Re-tag the same image under its registry reference so bib records
+          # that instead. bib has no --target-imgref flag, so the tag is the
+          # mechanism. The image is already in the rootful storage mounted into
+          # the bib container, so this resolves locally without a pull.
+          sudo podman tag "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" \
+            "${{ steps.push.outputs.install_ref }}"
+          sudo podman images
 
       - name: Build ISO (bootc-image-builder)
         run: |
@@ -178,7 +205,7 @@ jobs:
             --type anaconda-iso \
             --use-librepo=True \
             --rootfs btrfs \
-            "localhost/${IMAGE_NAME}:${DEFAULT_TAG}"
+            "${{ steps.push.outputs.install_ref }}"
 
           sudo chown -R "$(id -u):$(id -g)" output
           echo "=== bib output tree:"
