@@ -226,6 +226,40 @@ Example: `BlueARM_0.1.0-base-arm64-alpha` (current checkpoint — base builds + 
 builds in CI; boot in Fusion not yet confirmed). The container image tag (`DEFAULT_TAG`,
 currently `alpha`) tracks the same maturity word.
 
+### 2.4 Registry release streams
+
+Git tags above are immutable checkpoints in history. The registry carries two *floating*
+streams plus an immutable per-build tag:
+
+| Tag | Meaning | Written by |
+|---|---|---|
+| `<short-sha>` | immutable, every build | every push to `dev` / `main` |
+| `:testing` | newest `dev` build; may be broken | CI, automatically |
+| `:stable` | last build verified booting in a VM | manual promotion |
+| `:latest` | alias of `:stable`, for tooling that assumes it exists | manual promotion |
+
+**Promotion re-tags a verified digest — it never rebuilds.** A rebuild from the same commit
+can drift (base image, upstream packages, COPR content), so the artifact tested would not be
+the artifact shipped. Promotion is a registry-side copy of an existing digest:
+
+```bash
+skopeo copy --all \
+  docker://ghcr.io/kitsunerhin/bluesilicon@sha256:<verified-digest> \
+  docker://ghcr.io/kitsunerhin/bluesilicon:stable
+```
+
+Because the cosign signature is bound to the digest rather than the tag, re-tagging carries
+the signature with it — a promoted image satisfies the Phase 6 `sigstoreSigned` policy with
+no re-signing step.
+
+Switching streams on an installed VM is a single `bootc switch`, so keeping the streams
+distinct costs the user nothing.
+
+**Not yet implemented.** `build.yml` currently writes `:dev` on the `dev` branch and
+`:latest` on `main`. Renaming `:dev` → `:testing` (it reads as a branch name, not a maturity
+level) and moving `:latest` off automatic `main` builds onto manual promotion are both
+pending — see Phase 5.1.
+
 ---
 
 ## 3. Phases
@@ -360,6 +394,38 @@ Phase 3 remainder (push/sign/publish) or Phase 5 (dx variant).
 
 Second matrix leg once base is stable. `dx` pulls in devcontainer tooling, docker/podman,
 VS Code — more COPR and Flatpak surface, so more aarch64 gaps. Deliberately sequenced last.
+
+**Scope reduced 2026-07-31.** The dx *Flatpak* set already ships in the base image — the
+`preinstall.d` generation in `patches/0003` consumes both `system-flatpaks.Brewfile` and
+`system-dx-flatpaks.Brewfile`. Folding six packages in was cheaper than carrying a second
+image variant through the build matrix. What remains for a real `dx` leg is the RPM/COPR
+surface (VS Code, devcontainer CLI, docker), not the Flatpaks.
+
+#### 5.1 Installed VM points at the wrong update source — found 2026-07-30
+
+bootc-image-builder stamps the deployment with whatever reference it composed *from*. CI
+composes from the local build tag, so an installed VM reports `localhost/bluesilicon:alpha`
+as its upstream and `bootc upgrade` cannot resolve it. The one-time workaround is
+`bootc switch ghcr.io/kitsunerhin/bluesilicon:<stream>`, which rewrites the recorded source
+permanently — but a freshly installed ISO should never need it.
+
+Two candidate fixes:
+
+1. **Compose the ISO from the registry ref.** The GHCR push already runs before the ISO
+   step, so pull the pushed tag back into rootful storage and point bib at
+   `ghcr.io/kitsunerhin/bluesilicon:<stream>` instead of `localhost/…`. Costs one extra pull
+   in CI; the deployment then records the registry ref natively.
+2. **Override the recorded ref at install time.** `bootc install` distinguishes the source
+   image from the target image reference, so composing locally while stamping the registry
+   ref would be cheaper. **Unverified:** whether our pinned bib digest exposes that flag has
+   not been checked — confirm before depending on it.
+
+Prefer (1) unless (2) is confirmed. Whichever is used, the stamped ref must match the stream
+that produced the ISO (§2.4): a testing ISO should track `:testing`, not silently follow
+`:stable` on its first upgrade.
+
+Do this together with the `:dev` → `:testing` rename, since both touch the same tagging
+logic in `build.yml`.
 
 ### Phase 6 — Signature enforcement (pre-release gate)
 
