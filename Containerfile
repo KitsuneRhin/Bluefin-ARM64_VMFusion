@@ -136,10 +136,18 @@ RUN --mount=type=cache,dst=/var/cache/libdnf5 \
 # Makes `/opt` writeable by default
 RUN rm -rf /opt && ln -s /var/opt /opt
 
-# /var/lib/ is runtime state (not in the ostree commit). systemd-tmpfiles-setup
-# creates this dir on first boot so ublue-system-setup.service can write its
-# json.lock and first-boot hooks can run.
-RUN printf 'd /var/lib/ublue-os 0755 root root -\n' \
+# /root is a symlink to /var/roothome, and /var is runtime state rather than part
+# of the ostree commit — so this directory cannot be baked into the image and has
+# to be recreated at boot. libsetup.sh's version-script opens
+# $HOME/.local/share/ublue/setup_versioning.json.lock through a redirect that the
+# shell sets up *before* the mkdir inside the same subshell runs; without the
+# directory, ublue-system-setup.service exits 0 having skipped every privileged
+# hook. The user-account equivalent is seeded via /etc/skel in 17-cleanup.sh.
+# Parents are declared explicitly rather than relying on implicit creation.
+RUN printf '%s\n' \
+    'd /var/roothome/.local 0700 root root -' \
+    'd /var/roothome/.local/share 0700 root root -' \
+    'd /var/roothome/.local/share/ublue 0700 root root -' \
     > /usr/lib/tmpfiles.d/ublue-os-state.conf
 
 CMD ["/sbin/init"]
