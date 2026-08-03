@@ -431,8 +431,15 @@ sudo podman tag "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" "${INSTALL_REF}"
 
 Because the rootful store is already bind-mounted into the bib container, this resolves
 locally and costs no extra pull. The stamped reference follows the stream that produced the
-ISO (§2.4): a `dev` build stamps `:testing`, a `main` build stamps its immutable `<short-sha>`
-tag, so a testing ISO never silently follows `:stable` on its first upgrade.
+ISO (§2.4): a `dev` build stamps `:testing`, a `main` build stamps `:stable`.
+
+**Corrected 2026-08-03.** `main` initially stamped its immutable `<short-sha>` tag, on the
+reasoning that main publishes no floating stream. That resolves correctly and looks right in
+`bootc status`, but the tag never moves — so `bootc upgrade` on a VM installed from a release
+ISO would report no update, permanently. That is the very failure this section exists to fix,
+wearing a convincing disguise. Release ISOs stamp `:stable`. The ISO's contents and whatever
+`:stable` points to at install time may differ; the first upgrade reconciles them, which is
+the intended behaviour.
 
 Landed together with the `:dev` → `:testing` rename, since both touch the same tagging logic.
 

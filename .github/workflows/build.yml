@@ -128,7 +128,15 @@ jobs:
             INSTALL_REF="${GHCR_IMAGE}:testing"
           else
             FLOAT_TAG="(none — main publishes the SHA tag only)"
-            INSTALL_REF="${GHCR_IMAGE}:${SHORT}"
+            # Stamp :stable, not the SHA tag. main's ISO is the release artifact,
+            # and a VM must be able to `bootc upgrade` after installing from it.
+            # An immutable <short-sha> resolves fine but never moves, so upgrade
+            # would be a permanent no-op — the exact failure §5.1 set out to fix,
+            # just with a reference that looks correct in `bootc status`.
+            # The ISO's contents and whatever :stable points to at install time
+            # may differ; the first upgrade reconciles that, which is the
+            # intended behaviour for a release image.
+            INSTALL_REF="${GHCR_IMAGE}:stable"
           fi
           echo "float_tag=${FLOAT_TAG}" >> "$GITHUB_OUTPUT"
 
