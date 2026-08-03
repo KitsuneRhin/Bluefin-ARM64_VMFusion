@@ -157,7 +157,10 @@ jobs:
           cosign sign --yes \
             "${{ steps.push.outputs.ref }}@${{ steps.push.outputs.digest }}"
 
-      - name: Scan image with Trivy
+      # Two passes on purpose. The first reports CRITICAL+HIGH for visibility and
+      # never fails; the second fails the build on CRITICAL only. Trivy caches
+      # its vulnerability DB within the job, so the second pass is cheap.
+      - name: Scan image with Trivy (report, informational)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         continue-on-error: true
         with:
@@ -167,6 +170,18 @@ jobs:
           ignore-unfixed: true
           vuln-type: os,library
           severity: CRITICAL,HIGH
+          trivyignores: .trivyignore
+
+      - name: Gate on CRITICAL vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: "${{ steps.push.outputs.ref }}:${{ steps.push.outputs.sha_tag }}"
+          format: table
+          exit-code: "1"           # fail the build
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL
+          trivyignores: .trivyignore
 
       # bootc-image-builder must run rootful + privileged. Bridge the rootless
       # image into rootful storage via a save|load pipe (no temp file, more

@@ -435,6 +435,19 @@ Landed together with the `:dev` → `:testing` rename, since both touch the same
 reference in `bootc status` and can `bootc upgrade` with no `bootc switch` first. Confirm on
 the next clean install.
 
+#### 5.2 Vulnerability gating — implemented 2026-07-31
+
+Trivy runs twice in `build.yml`: an informational pass reporting CRITICAL+HIGH that never
+fails, and a gate pass that fails the build on **CRITICAL only**. HIGH and below are visible
+but non-blocking, on the grounds that this image inherits a large Go-binary surface from
+upstream and blocking on HIGH would stall work we cannot action.
+
+Suppressions live in `.trivyignore`, and are only legitimate for findings that cannot be
+fixed in this repository — a vendored dependency inside a prebuilt upstream binary. Each
+entry carries a reason, a date, and its removal condition. The list is currently one entry
+(`CVE-2026-33186`, grpc in an upstream Go binary) and should be reviewed whenever the
+informational pass changes.
+
 ### Phase 6 — Signature enforcement (pre-release gate)
 
 Before promoting any build to `release` maturity, configure the installed image to

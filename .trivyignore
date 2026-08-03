@@ -1,0 +1,19 @@
+# Trivy suppressions for the CRITICAL gate in .github/workflows/build.yml.
+#
+# CRITICAL findings fail the build. HIGH and below are reported by the
+# informational pass but never gate. Only add an entry here when the finding is
+# genuinely not actionable in this repository — a vendored dependency inside a
+# prebuilt upstream binary we do not compile. Every entry needs a reason, a
+# date, and the condition under which it should be removed.
+#
+# Review these whenever a build's informational pass changes, and drop entries
+# as soon as the upstream package is rebuilt.
+
+# CVE-2026-33186 — google.golang.org/grpc v1.72.2, fixed upstream in 1.79.3.
+# Vendored into a Go binary shipped by an upstream package (the image's Go
+# binaries are tailscale/tailscaled, uupd and umotd; Trivy reports this against
+# a content-addressed ostree object, so the exact one is unattributed). We do
+# not build any of them, so the fix has to come from an upstream rebuild
+# against newer grpc — there is no change we can make here.
+# Added 2026-07-31. Remove once the upstream package ships grpc >= 1.79.3.
+CVE-2026-33186
