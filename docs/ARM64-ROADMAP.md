@@ -354,7 +354,7 @@ than assuming drop-in.
 Publish to `ghcr.io/kitsunerhin/bluesilicon:stable`. Single-arch manifest is fine;
 `create-manifest` is only needed if amd64 is ever added.
 
-### Phase 4 — Disk image delivery (VMware Fusion) — in progress
+### Phase 4 — Disk image delivery (VMware Fusion) — ✅ DONE (pending `dev → main` merge)
 
 **CI produces a VMDK 2026-07-24.** The `build.yml` job (on `dev`) builds the image, bridges
 it into rootful storage, runs `bootc-image-builder --type vmdk --rootfs btrfs` against
@@ -393,8 +393,13 @@ Apple Silicon (UEFI + NVMe). Deployment phase at `/run/install/repo/container` t
 this is expected. After reboot, initial GNOME setup ran normally. Full ARM64 boot chain
 confirmed. Tagged `BlueARM_0.1.0-base-arm64-beta`.
 
-Next: merge `dev → main`, write `docs/VM-SETUP.md`, then decide whether to proceed to
-Phase 3 remainder (push/sign/publish) or Phase 5 (dx variant).
+**Delivery complete 2026-07-31.** `docs/VM-SETUP.md` is written, the Phase 3 remainder
+(push/sign/scan) shipped, and §5.1 fixed the ISO stamping an unusable update source. The ISO
+path is the supported install route; flat-VMDK via `qemu-img convert` remains an unexplored
+option, but `bootc upgrade` from the registry has made it unnecessary in practice.
+
+Outstanding for this phase: **merge `dev` → `main`**, which has not happened since the
+tagging rework — `main` still carries the old `:dev`/`:latest` behaviour.
 
 ### Phase 5 — dx variant
 
