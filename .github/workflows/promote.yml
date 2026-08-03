@@ -1,0 +1,120 @@
+name: Promote to stable
+
+# Moves an already-built, already-boot-verified image onto the :stable (and
+# optionally :latest) stream.
+#
+# This never rebuilds. A rebuild from the same commit can drift — base image,
+# upstream packages, COPR content are all resolved at build time — so the
+# artifact that was tested would not be the artifact shipped. Promotion is a
+# registry-side copy of an existing digest.
+#
+# The cosign signature is bound to the digest rather than the tag, so it carries
+# over unchanged and the promoted image satisfies the Phase 6 sigstoreSigned
+# policy with no re-signing. See docs/ARM64-ROADMAP.md §2.4.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "Build to promote — short SHA tag (e.g. 4f958ba) or a sha256:… digest"
+        required: true
+        type: string
+      also_latest:
+        description: "Also move :latest to this image"
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: promote
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write    # cosign verification
+
+env:
+  GHCR_IMAGE: ghcr.io/kitsunerhin/bluesilicon
+
+jobs:
+  promote:
+    name: Promote ${{ inputs.source }} to :stable
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - name: Ensure skopeo
+        run: |
+          set -euo pipefail
+          if ! command -v skopeo >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq skopeo
+          fi
+          skopeo --version
+
+      - name: Log in to GHCR
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Resolve source to an immutable digest
+        id: src
+        run: |
+          set -euo pipefail
+          IN="${{ inputs.source }}"
+          if [[ "${IN}" == sha256:* ]]; then
+            SRC="${GHCR_IMAGE}@${IN}"
+          else
+            SRC="${GHCR_IMAGE}:${IN}"
+          fi
+
+          # Resolve to a digest and promote *that*, so the artifact copied is
+          # pinned even if the input was a moving tag.
+          DIGEST=$(skopeo inspect --format '{{.Digest}}' "docker://${SRC}")
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "pinned=${GHCR_IMAGE}@${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "resolved ${SRC} -> ${DIGEST}"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Verify the image was signed by this pipeline
+        run: |
+          set -euo pipefail
+          # Gate promotion on provenance: refuse to move :stable onto anything
+          # our build workflow did not sign.
+          cosign verify \
+            --certificate-identity-regexp="^https://github.com/KitsuneRhin/Bluefin-ARM64_VMFusion/" \
+            --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+            "${{ steps.src.outputs.pinned }}"
+
+      - name: Copy to :stable
+        run: |
+          set -euo pipefail
+          skopeo copy --all \
+            "docker://${{ steps.src.outputs.pinned }}" \
+            "docker://${GHCR_IMAGE}:stable"
+
+      - name: Copy to :latest
+        if: ${{ inputs.also_latest }}
+        run: |
+          set -euo pipefail
+          skopeo copy --all \
+            "docker://${{ steps.src.outputs.pinned }}" \
+            "docker://${GHCR_IMAGE}:latest"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Promoted"
+            echo '```'
+            echo "source:  ${{ inputs.source }}"
+            echo "digest:  ${{ steps.src.outputs.digest }}"
+            echo "streams: :stable$([[ "${{ inputs.also_latest }}" == "true" ]] && echo ' :latest')"
+            echo '```'
+            echo "Rebase an installed VM with:"
+            echo '```bash'
+            echo "sudo bootc switch ${GHCR_IMAGE}:stable"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"

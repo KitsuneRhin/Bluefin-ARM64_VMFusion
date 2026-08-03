@@ -1,17 +1,25 @@
 name: Build arm64 base image
 
-# Phase 3/4 workflow. Builds the arm64 image on a native runner, then converts
-# it to a VMware Fusion VMDK with bootc-image-builder and uploads it as a
-# downloadable artifact for manual import + boot testing. No registry push,
-# signing, or release yet — that comes once the runtime path is validated.
+# Full build pipeline. Builds the arm64 image on a native runner, pushes it to
+# GHCR, signs it with keyless cosign (OIDC), scans it with Trivy, then builds an
+# Anaconda installer ISO with bootc-image-builder and uploads it as a downloadable
+# artifact for manual import + boot testing in VMware Fusion.
 #
-# Triggers on `dev`, not `main`: the VMDK step is still being brought up, so it
-# runs where that work happens. `main` is gated by the fast pr-check.yml instead.
-# Once the VMDK path is green, add `main` back here (or add publish steps).
+# Triggers on both `main` and `dev`:
+#   dev  → pushes an immutable <short-sha> tag and moves :testing
+#   main → pushes the <short-sha> tag only; no floating stream
+#
+# :stable and :latest are never written here. They are moved by promote.yml
+# against a digest that has actually been booted and verified — see
+# docs/ARM64-ROADMAP.md §2.4 for why promotion re-tags rather than rebuilds.
+#
+# ISO chosen over VMDK: Fusion on Apple Silicon rejected the bib stream-optimized
+# VMDK. Anaconda ISO matches the Silverblue workflow and boots reliably under
+# Fusion (UEFI + NVMe confirmed 2026-07-26).
 
 on:
   push:
-    branches: [dev]
+    branches: [main, dev]
     paths-ignore:
       - "docs/**"
       - "**/*.md"
@@ -24,22 +32,28 @@ concurrency:
 env:
   IMAGE_NAME: bluesilicon
   DEFAULT_TAG: alpha
+  GHCR_IMAGE: ghcr.io/kitsunerhin/bluesilicon
   # bootc-image-builder, pinned to its arm64 child manifest (verified 2026-07-24).
   BIB_IMAGE: "quay.io/centos-bootc/bootc-image-builder@sha256:a4779fc2307a7c2e82fda09e5c7712871fdb2dfae8a587f61d1dab32e7c4edc8"
 
+permissions:
+  contents: read
+  packages: write    # push to GHCR
+  id-token: write    # cosign keyless signing via OIDC
+
 jobs:
   build:
-    name: Build image + VMDK (ubuntu-24.04-arm)
+    name: Build image + push + ISO (ubuntu-24.04-arm)
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Prepare runner disk
         uses: ./.github/actions/prepare-disk
         with:
-          report-label: "after reclaim + relocate (pre-build)"
+          report-label: "after reclaim (pre-build)"
 
       - name: Assemble build context
         run: ./scripts/prepare-context.sh
@@ -78,6 +92,97 @@ jobs:
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
+      - name: Log in to GHCR
+        run: |
+          # podman login → used by podman push (image push step)
+          # docker login → used by cosign (reads ~/.docker/config.json, not podman's auth)
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push image to GHCR
+        id: push
+        run: |
+          set -euo pipefail
+          SHORT=$(git rev-parse --short HEAD)
+
+          # Immutable SHA tag — always pushed, and the only thing a main build
+          # publishes. The :stable and :latest streams are written exclusively
+          # by promote.yml, against a digest that has been booted and verified
+          # (roadmap §2.4).
+          podman tag "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" "${GHCR_IMAGE}:${SHORT}"
+          podman push "${GHCR_IMAGE}:${SHORT}" --digestfile /tmp/digest.txt
+          DIGEST=$(cat /tmp/digest.txt)
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "ref=${GHCR_IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "sha_tag=${SHORT}" >> "$GITHUB_OUTPUT"
+
+          # :testing tracks dev only. main must not write it — main lags dev,
+          # so publishing from main would move the stream backwards for anyone
+          # tracking it.
+          if [[ "${{ github.ref }}" == "refs/heads/dev" ]]; then
+            podman tag "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" "${GHCR_IMAGE}:testing"
+            podman push "${GHCR_IMAGE}:testing"
+            FLOAT_TAG="testing"
+            INSTALL_REF="${GHCR_IMAGE}:testing"
+          else
+            FLOAT_TAG="(none — main publishes the SHA tag only)"
+            INSTALL_REF="${GHCR_IMAGE}:${SHORT}"
+          fi
+          echo "float_tag=${FLOAT_TAG}" >> "$GITHUB_OUTPUT"
+
+          # The reference bootc-image-builder composes from, and therefore the
+          # update source stamped into every VM installed from the ISO.
+          echo "install_ref=${INSTALL_REF}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### GHCR push"
+            echo '```'
+            echo "image:       ${GHCR_IMAGE}:${SHORT}"
+            echo "stream:      ${FLOAT_TAG}"
+            echo "digest:      ${DIGEST}"
+            echo "ISO tracks:  ${INSTALL_REF}"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign image (keyless OIDC)
+        run: |
+          set -euo pipefail
+          # Sign the immutable SHA-tagged digest. The floating tag (latest/dev)
+          # resolves to the same digest, so one signature covers both.
+          cosign sign --yes \
+            "${{ steps.push.outputs.ref }}@${{ steps.push.outputs.digest }}"
+
+      # Two passes on purpose. The first reports CRITICAL+HIGH for visibility and
+      # never fails; the second fails the build on CRITICAL only. Trivy caches
+      # its vulnerability DB within the job, so the second pass is cheap.
+      - name: Scan image with Trivy (report, informational)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        continue-on-error: true
+        with:
+          image-ref: "${{ steps.push.outputs.ref }}:${{ steps.push.outputs.sha_tag }}"
+          format: table
+          exit-code: "0"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+          trivyignores: .trivyignore
+
+      - name: Gate on CRITICAL vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: "${{ steps.push.outputs.ref }}:${{ steps.push.outputs.sha_tag }}"
+          format: table
+          exit-code: "1"           # fail the build
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL
+          trivyignores: .trivyignore
+
       # bootc-image-builder must run rootful + privileged. Bridge the rootless
       # image into rootful storage via a save|load pipe (no temp file, more
       # robust than podman image scp across the rootless/rootful boundary).
@@ -85,9 +190,20 @@ jobs:
         run: |
           set -euo pipefail
           podman save "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" | sudo podman load
-          sudo podman images "localhost/${IMAGE_NAME}"
 
-      - name: Build VMDK (bootc-image-builder)
+          # bootc-image-builder stamps the deployment with whatever reference it
+          # composed from. Composing from localhost/… produced VMs that reported
+          # localhost/bluesilicon:alpha as their update source and could not
+          # `bootc upgrade` without a manual `bootc switch` first (roadmap §5.1).
+          # Re-tag the same image under its registry reference so bib records
+          # that instead. bib has no --target-imgref flag, so the tag is the
+          # mechanism. The image is already in the rootful storage mounted into
+          # the bib container, so this resolves locally without a pull.
+          sudo podman tag "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" \
+            "${{ steps.push.outputs.install_ref }}"
+          sudo podman images
+
+      - name: Build ISO (bootc-image-builder)
         run: |
           set -euo pipefail
           STORAGE=$(sudo podman info --format json | jq -r '.store.graphRoot')
@@ -101,43 +217,46 @@ jobs:
             -v "$(pwd)/output:/output" \
             -v "${STORAGE}:/var/lib/containers/storage" \
             "${BIB_IMAGE}" \
-            --type vmdk \
+            --type anaconda-iso \
             --use-librepo=True \
             --rootfs btrfs \
-            "localhost/${IMAGE_NAME}:${DEFAULT_TAG}"
+            "${{ steps.push.outputs.install_ref }}"
 
           sudo chown -R "$(id -u):$(id -g)" output
           echo "=== bib output tree:"
           find output -type f -exec ls -lh {} +
 
-      - name: Report disk after VMDK
+      - name: Report disk after ISO build
         if: always()
         run: |
           {
-            echo "### Disk: after VMDK build"
+            echo "### Disk: after ISO build"
             echo '```'
             df -h / 2>/dev/null
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - name: Compress VMDK + checksum
+      - name: Compress ISO + checksum
         id: pack
         run: |
           set -euo pipefail
-          VMDK=$(find output -name '*.vmdk' | head -1)
-          if [[ -z "${VMDK}" ]]; then
-            echo "no .vmdk produced under output/" >&2
+          ISO=$(find output -name '*.iso' | head -1)
+          if [[ -z "${ISO}" ]]; then
+            echo "no .iso produced under output/" >&2
             find output -type f >&2
             exit 1
           fi
           SHORT=$(git rev-parse --short HEAD)
-          OUT="${IMAGE_NAME}-${DEFAULT_TAG}-${SHORT}.aarch64.vmdk.zst"
-          echo "compressing ${VMDK} ($(du -h "${VMDK}" | cut -f1)) → ${OUT}"
-          zstd -T0 -19 "${VMDK}" -o "${OUT}"
+          OUT="${IMAGE_NAME}-${DEFAULT_TAG}-${SHORT}.aarch64.iso.zst"
+          echo "compressing ${ISO} ($(du -h "${ISO}" | cut -f1)) → ${OUT}"
+          # ISOs compress significantly better than VMDKs (rpm/squashfs content
+          # is more compressible than a live btrfs volume). -3 is still fast and
+          # sufficient; bump to -9 if size matters more than CI runtime later.
+          zstd -T0 -3 "${ISO}" -o "${OUT}"
           sha256sum "${OUT}" > "${OUT}.sha256"
           ls -lh "${OUT}" "${OUT}.sha256"
           {
-            echo "### VMDK artifact"
+            echo "### ISO artifact"
             echo '```'
             cat "${OUT}.sha256"
             echo "compressed size: $(du -h "${OUT}" | cut -f1)"
@@ -145,10 +264,10 @@ jobs:
           } | tee -a "$GITHUB_STEP_SUMMARY"
           echo "artifact=${OUT}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload VMDK artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ${{ env.IMAGE_NAME }}-vmdk
+          name: ${{ env.IMAGE_NAME }}-iso
           path: |
             ${{ steps.pack.outputs.artifact }}
             ${{ steps.pack.outputs.artifact }}.sha256

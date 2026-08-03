@@ -1,0 +1,112 @@
+diff --git a/upstream/build_files/base/17-cleanup.sh b/upstream/build_files/base/17-cleanup.sh
+index f0189b3..f0bed9d 100755
+--- a/upstream/build_files/base/17-cleanup.sh
++++ b/upstream/build_files/base/17-cleanup.sh
+@@ -38,9 +38,106 @@ for file in fish htop nvtop; do
+ done
+ 
+ #Add the Flathub Flatpak remote and remove the Fedora Flatpak remote
+-flatpak remote-add --system --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
++# `flatpak remote-add --system` writes the remote into /var/lib/flatpak, which
++# clean-stage.sh wipes later in this same stage, so the remote never reaches the
++# image (bootc/ostree also treats /var as runtime state). Install the
++# .flatpakrepo declaratively under /etc instead: /etc is part of the ostree
++# commit, and flatpak reads /etc/flatpak/remotes.d at runtime.
++mkdir -p /etc/flatpak/remotes.d
++ghcurl "https://dl.flathub.org/repo/flathub.flatpakrepo" --retry 3 -Lo /etc/flatpak/remotes.d/flathub.flatpakrepo
++grep -qF 'Url=https://dl.flathub.org/repo/' /etc/flatpak/remotes.d/flathub.flatpakrepo
+ systemctl disable flatpak-add-fedora-repos.service
+ 
++# Preinstall Bluefin's curated Flatpak set on first boot.
++# `common` ships these lists as Homebrew-style Brewfiles driven by
++# `ujust install-system-flatpaks`, which is manual, needs brew initialised, and
++# aborts the whole batch on a single bad ref. Transcode them into flatpak
++# preinstall.d entries so flatpak-preinstall.service (enabled above) applies
++# them as one transaction, resolving shared runtimes such as org.gnome.Platform
++# only once.
++#
++# The dx set is folded in unconditionally: it is six packages, and carrying a
++# second image variant to gate them is not worth the build matrix.
++FLATPAK_BREWFILES=(
++    /usr/share/ublue-os/homebrew/system-flatpaks.Brewfile
++    /usr/share/ublue-os/homebrew/system-dx-flatpaks.Brewfile
++)
++FLATPAK_PREINSTALL_DIR=/usr/share/flatpak/preinstall.d
++FLATPAK_PREINSTALL="${FLATPAK_PREINSTALL_DIR}/bluefin-system-flatpaks.preinstall"
++# Refs excluded from preinstall, verified against the Flathub API 2026-07-30:
++#   org.mozilla.Thunderbird   — published for x86_64 only, no aarch64 build
++#   com.github.tuna_os.Tavern — not published on Flathub at all (404)
++# An unresolvable ref would fail the transaction and retry-loop the unit.
++FLATPAK_SKIP=("org.mozilla.Thunderbird" "com.github.tuna_os.Tavern")
++
++for brewfile in "${FLATPAK_BREWFILES[@]}"; do
++    if [[ ! -f "${brewfile}" ]]; then
++        echo "ERROR: ${brewfile} not found — upstream moved the curated list" >&2
++        exit 1
++    fi
++done
++
++mkdir -p "${FLATPAK_PREINSTALL_DIR}"
++: >"${FLATPAK_PREINSTALL}"
++while read -r app; do
++    skip=0
++    for ref in "${FLATPAK_SKIP[@]}"; do
++        if [[ "${app}" == "${ref}" ]]; then
++            skip=1
++        fi
++    done
++    if [[ "${skip}" -eq 1 ]]; then
++        echo "Skipping ${app}: no aarch64 build available on Flathub"
++        continue
++    fi
++
++    # Flathub addons (appstream type "addon") are published under runtime/, not
++    # app/. Declaring IsRuntime=false makes flatpak look up
++    # app/<id>/<arch>/stable, which does not exist; the failing
++    # flatpak_remote_state_lookup_ref() is a bare `continue`, so the ref is
++    # dropped with no error and the unit still exits 0. org.gtk.Gtk3theme.* are
++    # addons by construction — confirmed for adw-gtk3 and adw-gtk3-dark against
++    # the Flathub appstream API on 2026-07-31.
++    is_runtime=false
++    case "${app}" in
++        org.gtk.Gtk3theme.*) is_runtime=true ;;
++    esac
++
++    printf '[Flatpak Preinstall %s]\nBranch=stable\nIsRuntime=%s\n\n' \
++        "${app}" "${is_runtime}" >>"${FLATPAK_PREINSTALL}"
++done < <(sed -n 's/^flatpak "\([^"]*\)".*/\1/p' "${FLATPAK_BREWFILES[@]}" | sort -u)
++echo "Generated $(grep -c '^\[Flatpak Preinstall' "${FLATPAK_PREINSTALL}" || true) Flatpak preinstall entries ($(grep -c '^IsRuntime=true' "${FLATPAK_PREINSTALL}" || true) as runtimes)"
++
++# Deliberately no CollectionID key. flatpak_transaction_add_sync_preinstalled()
++# gates on it:
++#
++#     if (config->collection_id != NULL &&
++#         g_strcmp0 (remote_collection_id, config->collection_id) != 0)
++#       continue;
++#
++# `remote_collection_id` is the remote's *configured* xa.collection-id, not the
++# collection advertised in the remote's summary. Flathub's .flatpakrepo sets no
++# DeployCollectionID, so the configured value is NULL, never matches
++# "org.flathub.Stable", and every remote is skipped — the transaction resolves
++# empty and flatpak reports "Nothing to do" despite finding every ref. Omitting
++# the key leaves collection_id NULL, which bypasses the check and falls through
++# to a normal per-remote lookup. The key is optional: the parser reads it with a
++# NULL error handler in flatpak_get_preinstall_config().
++#
++# Upstream's own bazaar.preinstall sets it, and the parser merges groups by app
++# name across files, so its value would override ours for Bazaar. Strip the key
++# from every file in the directory rather than only omitting it from ours.
++sed -i '/^CollectionID=/d' "${FLATPAK_PREINSTALL_DIR}"/*.preinstall
++
++# libsetup.sh's version-script opens
++# $HOME/.local/share/ublue/setup_versioning.json.lock through a redirect that is
++# set up *before* the mkdir inside the same subshell can run, so the directory
++# has to exist beforehand or every hook silently no-ops (ublue-user-setup still
++# exits 0). /etc/skel seeds it for accounts created after deployment; the
++# root/system case is a tmpfiles.d rule in the Containerfile, since /root is a
++# symlink to /var/roothome and /var is not part of the ostree commit.
++mkdir -p /etc/skel/.local/share/ublue
++
+ # NOTE: With isolated COPR installation, most repos are never enabled globally.
+ # We only need to clean up repos that were enabled during the build process.
+ 

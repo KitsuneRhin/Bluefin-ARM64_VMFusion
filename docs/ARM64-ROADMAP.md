@@ -205,6 +205,67 @@ Handled without touching `upstream/`:
   legible-drift signal the patch set gives for build scripts. Fold this into
   `upstream-sync.yml` in Phase 3.
 
+### 2.3 Tagging & versioning
+
+Git tags mark checkpoints. Format:
+
+```
+BlueARM_<major.minor.patch>-<variant>-<arch>-<maturity>
+```
+
+- **version** — rolling semver (`0.1.0`, `0.4.56`, …). Iterative, bumped per meaningful
+  checkpoint; not tied to a "full release" v1/v2 scheme.
+- **variant** — `base` | `dx` | …
+- **arch** — `arm64`.
+- **maturity** — how publish-ready the checkpoint is:
+  - `alpha` — builds and passes `bootc lint`, but **not boot-verified**. Not publishable.
+  - `beta` — boots and runs in the target VM; under testing.
+  - `release` — validated end-to-end; ready to publish.
+
+Example: `BlueARM_0.1.0-base-arm64-alpha` (current checkpoint — base builds + lints; VMDK
+builds in CI; boot in Fusion not yet confirmed). The container image tag (`DEFAULT_TAG`,
+currently `alpha`) tracks the same maturity word.
+
+### 2.4 Registry release streams
+
+Git tags above are immutable checkpoints in history. The registry carries two *floating*
+streams plus an immutable per-build tag:
+
+| Tag | Meaning | Written by |
+|---|---|---|
+| `<short-sha>` | immutable, every build | every push to `dev` / `main` |
+| `:testing` | newest `dev` build; may be broken | `build.yml`, **`dev` pushes only** |
+| `:stable` | last build verified booting in a VM | `promote.yml`, manual dispatch |
+| `:latest` | alias of `:stable`, for tooling that assumes it exists | `promote.yml`, manual dispatch |
+
+A `main` push publishes its `<short-sha>` tag and the ISO artifact but moves no
+floating stream. `main` lags `dev`, so writing `:testing` from it would drag the
+stream backwards for anyone tracking it, and writing `:stable` from it would mean
+"passed pr-check" rather than "confirmed booting".
+
+**Promotion re-tags a verified digest — it never rebuilds.** A rebuild from the same commit
+can drift (base image, upstream packages, COPR content), so the artifact tested would not be
+the artifact shipped. Promotion is a registry-side copy of an existing digest:
+
+```bash
+skopeo copy --all \
+  docker://ghcr.io/kitsunerhin/bluesilicon@sha256:<verified-digest> \
+  docker://ghcr.io/kitsunerhin/bluesilicon:stable
+```
+
+Because the cosign signature is bound to the digest rather than the tag, re-tagging carries
+the signature with it — a promoted image satisfies the Phase 6 `sigstoreSigned` policy with
+no re-signing step.
+
+Switching streams on an installed VM is a single `bootc switch`, so keeping the streams
+distinct costs the user nothing.
+
+**Implemented 2026-07-31.** `build.yml` writes `<short-sha>` always and `:testing` on `dev`
+only; `promote.yml` (workflow_dispatch, takes a short SHA or digest) resolves the input to an
+immutable digest, verifies it was cosign-signed by this pipeline, then copies it to `:stable`
+and optionally `:latest`. Promotion is gated on provenance so `:stable` can never be moved
+onto an image our build workflow did not sign.
+
 ---
 
 ## 3. Phases
@@ -250,7 +311,7 @@ avoid. Fix is to split `ctx` into `ctx-build` (build_files only) and `ctx-system
 Stage 1 bind only `ctx-build`. Deferred: it's a CI-time optimization, and it deviates from
 upstream's Containerfile so it needs weighing against subtree drift. Flagged, not yet done.
 
-### Phase 3 — CI — in progress
+### Phase 3 — CI — ✅ DONE (push/sign/scan)
 
 **First green CI build 2026-07-24** (`build.yml` on `ubuntu-24.04-arm`, native). The image
 builds and passes `bootc container lint --fatal-warnings` (12 passed, 2 skipped) on a
@@ -267,9 +328,17 @@ image, 8.9 GB podman store) **113 GiB remained free**. A `bootc-image-builder` V
 `rechunk` fits in one job with enormous margin, so Phase 4's disk build can share the runner
 — splitting `disk.yml` out remains a clean-separation choice, not a space necessity.
 
-`.github/actions/prepare-disk` (reclaim → relocate → report) and the instrumented
-`build.yml` implement this. Remaining Phase 3 work: push/sign/publish and the
-`projectbluefin/actions` composition below.
+`.github/actions/prepare-disk` (reclaim → report) and the instrumented `build.yml`
+implement this.
+
+**Phase 3 complete 2026-07-26.** `build.yml` now: logs in to GHCR → pushes with an
+immutable SHA tag + a floating branch tag (`latest` on main, `dev` on dev) → signs with
+keyless cosign (OIDC, `sigstore/cosign-installer@v4.1.2`) → scans with Trivy
+(`aquasecurity/trivy-action@v0.36.0`, `continue-on-error: true`, informational for now) →
+builds and uploads the Anaconda ISO artifact. `build.yml` now triggers on both `main` and
+`dev`. Once installed, the VM can update in-place via `sudo bootc upgrade` against
+`ghcr.io/kitsunerhin/bluesilicon:latest`. The `projectbluefin/actions` composition
+(`rechunk`, `scan-image`) is deferred — the custom pipeline covers the same ground.
 
 #### Original Phase 3 plan
 
@@ -285,33 +354,133 @@ than assuming drop-in.
 Publish to `ghcr.io/kitsunerhin/bluesilicon:stable`. Single-arch manifest is fine;
 `create-manifest` is only needed if amd64 is ever added.
 
-### Phase 4 — Disk image delivery (VMware Fusion)
+### Phase 4 — Disk image delivery (VMware Fusion) — ✅ DONE (pending `dev → main` merge)
 
-`disk.yml`: run `bootc-image-builder --type vmdk --target-arch arm64` against the pushed
-image, attach the result to a GitHub Release. `vmdk` is a first-class
-`bootc-image-builder` output type, so no format conversion step is needed for Fusion.
+**CI produces a VMDK 2026-07-24.** The `build.yml` job (on `dev`) builds the image, bridges
+it into rootful storage, runs `bootc-image-builder --type vmdk --rootfs btrfs` against
+`disk_config/disk.toml`, and uploads a `zstd`-compressed artifact + `sha256` as a 14-day
+Actions artifact. First green disk build: `bluesilicon-alpha-<sha>.aarch64.vmdk.zst`, ~3.8 GiB
+(3.78 GiB used of the 20 GiB sparse disk). No registry push / signing / Release yet — those
+wait until the runtime path is confirmed. Native arm64 build, so no `--target-arch` needed.
 
-Emit `qcow2` as a second artifact only if you later want QEMU/UTM as a fallback host. Not
-required for the Fusion path — don't build it by default, the artifacts are multi-GB.
+Three things learned building it:
+- **Do not relocate podman storage.** `ubuntu-24.04-arm` has a single root disk (`/mnt` is a
+  directory on it, not a separate volume), so a move frees nothing — and relocating rootful
+  storage baked the `/mnt` path into the libpod DB, which then mismatched bib's default
+  `/var/lib/containers` mount (`database configuration mismatch`). Default paths only.
+- **`open-vm-tools` + `open-vm-tools-desktop` are already installed and `vmtoolsd` is
+  enabled** in the base image (Silverblue default), so the §4 "pleasant to use" gap needs no
+  manifest change. Clipboard/display integration should work on first boot.
+- **zstd compresses this disk by only ~1.3%** (content is already dense), so the workflow uses a
+  low level (`-3`) — high levels waste CPU for no size gain.
 
-Compress with `zstd` before upload.
+**VMDK boot failed 2026-07-26.** VMware Fusion on Apple Silicon rejected the bib-produced
+VMDK as "target image not recognized" and would not boot it. Root cause: bib emits a
+**stream-optimized VMDK** (VMware's transfer/archive format), which Fusion does not treat as
+a directly bootable disk. Fusion expected a flat or sparse monolithic VMDK. Additionally,
+the Fusion NVMe controller assignment did not match the image's EFI boot entries.
 
-Because CI produces the disk, your Mac needs no build tooling: download, import to Fusion,
-boot. Subsequent updates arrive over `bootc upgrade` inside the VM, so the disk image is a
-**one-time bootstrap**, not a recurring download. This is the payoff of the whole
-pipeline — after first boot you never touch a disk artifact again.
+**Pivot to Anaconda ISO (2026-07-26).** `--type anaconda-iso` produces a bootable Anaconda
+installer that matches the workflow already known to work (Fedora Silverblue ISO boots in
+Fusion instantly). Boot flow: mount ISO → install to a fresh virtual disk → reboot into
+installed system. Once the ISO path validates end-to-end, revisit flat-VMDK via
+`qemu-img convert -f raw -O vmdk -o subformat=monolithicFlat` or `bootc upgrade`-based
+update distribution. Artifact filename switches from `.vmdk.zst` to `.iso.zst`.
 
-Document the Fusion import in `docs/VM-SETUP.md`: UEFI firmware, ≥4 vCPU / 8 GB RAM,
-≥20 GiB disk (matches `disk_config/disk.toml`), and whether `open-vm-tools` needs adding
-to the package manifest for clipboard/resolution integration — **verify this**, it is the
-most likely small gap between "boots" and "pleasant to use". Silverblue may already ship it.
+**ISO boots and installs successfully — 2026-07-26.** Anaconda ISO boots under Fusion on
+Apple Silicon (UEFI + NVMe). Deployment phase at `/run/install/repo/container` takes
+15–40 min with no visible progress bar (silent OCI layer unpack onto the virtual disk);
+this is expected. After reboot, initial GNOME setup ran normally. Full ARM64 boot chain
+confirmed. Tagged `BlueARM_0.1.0-base-arm64-beta`.
+
+**Delivery complete 2026-07-31.** `docs/VM-SETUP.md` is written, the Phase 3 remainder
+(push/sign/scan) shipped, and §5.1 fixed the ISO stamping an unusable update source. The ISO
+path is the supported install route; flat-VMDK via `qemu-img convert` remains an unexplored
+option, but `bootc upgrade` from the registry has made it unnecessary in practice.
+
+Outstanding for this phase: **merge `dev` → `main`**, which has not happened since the
+tagging rework — `main` still carries the old `:dev`/`:latest` behaviour.
 
 ### Phase 5 — dx variant
 
 Second matrix leg once base is stable. `dx` pulls in devcontainer tooling, docker/podman,
 VS Code — more COPR and Flatpak surface, so more aarch64 gaps. Deliberately sequenced last.
 
-### Phase 6 — Upstream (optional, high value)
+**Scope reduced 2026-07-31.** The dx *Flatpak* set already ships in the base image — the
+`preinstall.d` generation in `patches/0003` consumes both `system-flatpaks.Brewfile` and
+`system-dx-flatpaks.Brewfile`. Folding six packages in was cheaper than carrying a second
+image variant through the build matrix. What remains for a real `dx` leg is the RPM/COPR
+surface (VS Code, devcontainer CLI, docker), not the Flatpaks.
+
+#### 5.1 Installed VM points at the wrong update source — found 2026-07-30, fixed 2026-07-31
+
+bootc-image-builder stamps the deployment with whatever reference it composed *from*. CI
+composes from the local build tag, so an installed VM reports `localhost/bluesilicon:alpha`
+as its upstream and `bootc upgrade` cannot resolve it. The one-time workaround is
+`bootc switch ghcr.io/kitsunerhin/bluesilicon:<stream>`, which rewrites the recorded source
+permanently — but a freshly installed ISO should never need it.
+
+**Resolution.** bootc-image-builder documents no `--target-imgref` and no `--local` flag, so
+overriding the recorded reference at install time was not available. Instead the image is
+re-tagged under its registry reference in rootful storage before bib runs, and bib is invoked
+against that reference:
+
+```bash
+sudo podman tag "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" "${INSTALL_REF}"
+```
+
+Because the rootful store is already bind-mounted into the bib container, this resolves
+locally and costs no extra pull. The stamped reference follows the stream that produced the
+ISO (§2.4): a `dev` build stamps `:testing`, a `main` build stamps its immutable `<short-sha>`
+tag, so a testing ISO never silently follows `:stable` on its first upgrade.
+
+Landed together with the `:dev` → `:testing` rename, since both touch the same tagging logic.
+
+**Not yet verified on hardware:** that a VM installed from a post-fix ISO reports the registry
+reference in `bootc status` and can `bootc upgrade` with no `bootc switch` first. Confirm on
+the next clean install.
+
+#### 5.2 Vulnerability gating — implemented 2026-07-31
+
+Trivy runs twice in `build.yml`: an informational pass reporting CRITICAL+HIGH that never
+fails, and a gate pass that fails the build on **CRITICAL only**. HIGH and below are visible
+but non-blocking, on the grounds that this image inherits a large Go-binary surface from
+upstream and blocking on HIGH would stall work we cannot action.
+
+Suppressions live in `.trivyignore`, and are only legitimate for findings that cannot be
+fixed in this repository — a vendored dependency inside a prebuilt upstream binary. Each
+entry carries a reason, a date, and its removal condition. The list is currently one entry
+(`CVE-2026-33186`, grpc in an upstream Go binary) and should be reviewed whenever the
+informational pass changes.
+
+### Phase 6 — Signature enforcement (pre-release gate)
+
+Before promoting any build to `release` maturity, configure the installed image to
+**reject unsigned pulls** from our registry. Currently we sign every push (keyless cosign
+via OIDC) but the system's `/etc/containers/policy.json` is Fedora's default, which does
+not require it.
+
+What this involves (all in `system_files/`, no CI changes needed):
+
+- `/etc/containers/policy.json` — add a `sigstoreSigned` rule scoped to
+  `ghcr.io/kitsunerhin/bluesilicon` with the Fulcio issuer
+  (`https://token.actions.githubusercontent.com`) and the workflow subject
+  (`https://github.com/KitsuneRhin/Bluefin-ARM64_VMFusion/.github/workflows/build.yml@refs/heads/main`).
+- `/etc/pki/sigstore/fulcio_root.crt` and `rekor.pub` — Sigstore root trust bundle.
+- `/etc/containers/registries.d/ghcr-kitsunerhin.yaml` — point at the cosign signature store.
+
+Once in place, `bootc upgrade` will refuse to deploy any image that wasn't signed by our
+GitHub Actions pipeline — closing the loop between §3 signing and actual enforcement.
+
+To manually verify a push before enforcement is in place:
+```bash
+cosign verify \
+  --certificate-identity-regexp="github.com/KitsuneRhin/Bluefin-ARM64_VMFusion" \
+  --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+  ghcr.io/kitsunerhin/bluesilicon:latest
+```
+
+### Phase 7 — Upstream (optional, high value)
 
 The `[fedora_aarch64]` manifest patch from §1.1 is genuinely useful to Bluefin
 independently of this project. Offer it upstream. If accepted, our patch set shrinks and

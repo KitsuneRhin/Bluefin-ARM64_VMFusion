@@ -21,15 +21,15 @@ ARG BASE_IMAGE_NAME="silverblue"
 ARG FEDORA_MAJOR_VERSION="44"
 ARG BASE_IMAGE="quay.io/fedora-ostree-desktops/silverblue"
 
-# arm64 child manifest digests, all verified live 2026-07-20.
+# arm64 child manifest digests, all verified live 2026-07-27.
 #
 # These are per-arch child digests, not multi-arch index digests, so the arch is
 # explicit and does not depend on podman's platform resolution. Note that
 # upstream's image-versions.yml pins `common` to its *amd64* child manifest —
 # that pin is unusable here and must not be copied over.
-ARG BASE_IMAGE_REF="${BASE_IMAGE}@sha256:d921093409d7fe80d2b03ccbadbedb088f690b21e359859d0068c665e6ff4bf6"
+ARG BASE_IMAGE_REF="${BASE_IMAGE}@sha256:a3cbab99847fa302d881100d2e7da1be2183ad7577f68250b999725054fe63f3"
 ARG COMMON_IMAGE_REF="ghcr.io/projectbluefin/common@sha256:497cb90e7d30e1a93fda67c112b3146fb43e5e64a774301d2d7025cb57d1e90a"
-ARG BREW_IMAGE_REF="ghcr.io/ublue-os/brew@sha256:26fc5b56dad4aafaef39bfd1bee5657204fff31b5fb43c8af3646b3af71b94cf"
+ARG BREW_IMAGE_REF="ghcr.io/ublue-os/brew@sha256:8157460c2d2559ab7e5f2f6644a9c2be3b25fdf8d4a9fd42a34f6a0795eb359e"
 
 # hadolint ignore=DL3006
 FROM ${COMMON_IMAGE_REF} AS common
@@ -113,6 +113,7 @@ RUN --mount=type=cache,dst=/var/cache/libdnf5 \
     --mount=type=bind,from=ctx,source=/build_files/shared,target=/ctx/build_files/shared \
     --mount=type=bind,from=ctx,source=/build_files/base/00-image-info.sh,target=/ctx/build_files/base/00-image-info.sh \
     --mount=type=bind,from=ctx,source=/build_files/base/17-cleanup.sh,target=/ctx/build_files/base/17-cleanup.sh \
+    --mount=type=bind,from=ctx,source=/build_files/base/18-workarounds.sh,target=/ctx/build_files/base/18-workarounds.sh \
     --mount=type=bind,from=ctx,source=/build_files/base/19-initramfs.sh,target=/ctx/build_files/base/19-initramfs.sh \
     --mount=type=bind,from=ctx,source=/build_files/base/20-tests.sh,target=/ctx/build_files/base/20-tests.sh \
     --mount=type=secret,id=GITHUB_TOKEN \
@@ -125,6 +126,7 @@ RUN --mount=type=cache,dst=/var/cache/libdnf5 \
         /ctx/build_files/base/00-image-info.sh && \
         bash /ctx/build_files/shared/finalize-gnome-extensions.sh && \
         /ctx/build_files/base/17-cleanup.sh && \
+        /ctx/build_files/base/18-workarounds.sh && \
         /ctx/build_files/base/19-initramfs.sh && \
         /ctx/build_files/shared/validate-repos.sh && \
         /ctx/build_files/shared/clean-stage.sh && \
@@ -133,6 +135,20 @@ RUN --mount=type=cache,dst=/var/cache/libdnf5 \
 
 # Makes `/opt` writeable by default
 RUN rm -rf /opt && ln -s /var/opt /opt
+
+# /root is a symlink to /var/roothome, and /var is runtime state rather than part
+# of the ostree commit — so this directory cannot be baked into the image and has
+# to be recreated at boot. libsetup.sh's version-script opens
+# $HOME/.local/share/ublue/setup_versioning.json.lock through a redirect that the
+# shell sets up *before* the mkdir inside the same subshell runs; without the
+# directory, ublue-system-setup.service exits 0 having skipped every privileged
+# hook. The user-account equivalent is seeded via /etc/skel in 17-cleanup.sh.
+# Parents are declared explicitly rather than relying on implicit creation.
+RUN printf '%s\n' \
+    'd /var/roothome/.local 0700 root root -' \
+    'd /var/roothome/.local/share 0700 root root -' \
+    'd /var/roothome/.local/share/ublue 0700 root root -' \
+    > /usr/lib/tmpfiles.d/ublue-os-state.conf
 
 CMD ["/sbin/init"]
 
