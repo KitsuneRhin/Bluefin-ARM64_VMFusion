@@ -234,14 +234,19 @@ streams plus an immutable per-build tag:
 | Tag | Meaning | Written by |
 |---|---|---|
 | `<short-sha>` | immutable, every build | every push to `dev` / `main` |
-| `:testing` | newest `dev` build; may be broken | `build.yml`, **`dev` pushes only** |
+| `:latest` | rolling — newest `dev` build, hand-written or upstream-sync | `build.yml`, **`dev` builds only** |
 | `:stable` | last build verified booting in a VM | `promote.yml`, manual dispatch |
-| `:latest` | alias of `:stable`, for tooling that assumes it exists | `promote.yml`, manual dispatch |
 
 A `main` push publishes its `<short-sha>` tag and the ISO artifact but moves no
-floating stream. `main` lags `dev`, so writing `:testing` from it would drag the
+floating stream. `main` lags `dev`, so writing `:latest` from it would drag the
 stream backwards for anyone tracking it, and writing `:stable` from it would mean
 "passed pr-check" rather than "confirmed booting".
+
+**`:testing` was retired 2026-08-03.** It briefly existed as the `dev` stream while
+`:latest` aliased `:stable`. Once upstream-sync (§8) began rebuilding automatically,
+two auto-moving streams served no purpose: `:latest` became the rolling stream and
+`:stable` the reviewed fallback. `promote.yml` no longer writes `:latest` — doing so
+would clobber the automation and silently roll users backwards.
 
 **Promotion re-tags a verified digest — it never rebuilds.** A rebuild from the same commit
 can drift (base image, upstream packages, COPR content), so the artifact tested would not be
@@ -260,8 +265,8 @@ no re-signing step.
 Switching streams on an installed VM is a single `bootc switch`, so keeping the streams
 distinct costs the user nothing.
 
-**Implemented 2026-07-31.** `build.yml` writes `<short-sha>` always and `:testing` on `dev`
-only; `promote.yml` (workflow_dispatch, takes a short SHA or digest) resolves the input to an
+**Implemented 2026-07-31, revised 2026-08-03.** `build.yml` writes `<short-sha>` always and
+moves `:latest` on `dev` only; `promote.yml` (workflow_dispatch, takes a short SHA or digest) resolves the input to an
 immutable digest, verifies it was cosign-signed by this pipeline, then copies it to `:stable`
 and optionally `:latest`. Promotion is gated on provenance so `:stable` can never be moved
 onto an image our build workflow did not sign.
@@ -431,7 +436,7 @@ sudo podman tag "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" "${INSTALL_REF}"
 
 Because the rootful store is already bind-mounted into the bib container, this resolves
 locally and costs no extra pull. The stamped reference follows the stream that produced the
-ISO (§2.4): a `dev` build stamps `:testing`, a `main` build stamps `:stable`.
+ISO (§2.4): a `dev` build stamps `:latest`, a `main` build stamps `:stable`.
 
 **Corrected 2026-08-03.** `main` initially stamped its immutable `<short-sha>` tag, on the
 reasoning that main publishes no floating stream. That resolves correctly and looks right in
@@ -486,6 +491,46 @@ cosign verify \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
   ghcr.io/kitsunerhin/bluesilicon:latest
 ```
+
+### Phase 8 — Self-maintenance — partially implemented 2026-08-03
+
+Goal: upstream changes reach the VM without manual work, while a reviewed known-good
+stream remains available as a fallback.
+
+**Implemented.** `.github/workflows/upstream-sync.yml` runs daily. It re-resolves the four
+pinned arm64 digests (Silverblue, `common`, `brew`, bootc-image-builder), pulls the
+`projectbluefin/bluefin` subtree, and — only if `scripts/prepare-context.sh` still applies the
+patch set — commits to `dev` and triggers a build, which publishes `:latest`. `main` and
+`:stable` advance only through review and `promote.yml`.
+
+Two implementation notes that are easy to get wrong:
+
+- **skopeo, not Renovate.** Renovate's `docker` datasource resolves multi-arch *index*
+  digests. Every pin here must be the **arm64 child manifest** (§1.1). Upstream's own
+  Renovate config pins `common` to its amd64 child, so adopting it wholesale would
+  reintroduce precisely the bug the Containerfile warns about. `skopeo inspect --raw`
+  filtered on `.platform.architecture` returns the child digest directly.
+- **`GITHUB_TOKEN` pushes do not trigger workflows.** GitHub blocks that to prevent
+  recursion, so committing to `dev` from the sync job does *not* start `build.yml`. The job
+  dispatches the build explicitly against `dev` (`gh workflow run build.yml --ref dev`),
+  which needs `actions: write` and avoids storing a PAT.
+
+When upstream drift breaks a patch, nothing is committed — the job opens an issue and leaves
+`dev` untouched, so the previous build stays current. The drift detection built into
+`prepare-context.sh` is the interlock that makes unattended syncing safe.
+
+**Not implemented — automated boot verification.** Promotion to `:stable` still requires a
+human to boot an image, which is the assurance the stream model rests on. arm64 GitHub
+runners have no nested virtualisation, so an ISO cannot be cheaply booted. The realistic
+option is a `qcow2` from bib booted under QEMU/TCG, asserting that
+`flatpak-preinstall.service` and `ublue-system-setup.service` succeeded. Slow without KVM,
+but it is the only approach that preserves what `:stable` currently promises. Until then,
+promotion stays manual rather than quietly weakening the guarantee.
+
+**Not covered by the sync job.** RPM drift within unchanged pins — new builds of packages
+from Fedora, negativo17, tailscale, and the COPRs — does not move any tracked digest, so it
+triggers no rebuild. Run **Upstream sync** with `force_build` to pick those up, or add a
+weekly schedule if it proves to matter.
 
 ### Phase 7 — Upstream (optional, high value)
 

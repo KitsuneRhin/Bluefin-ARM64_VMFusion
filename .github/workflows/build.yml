@@ -6,12 +6,14 @@ name: Build arm64 base image
 # artifact for manual import + boot testing in VMware Fusion.
 #
 # Triggers on both `main` and `dev`:
-#   dev  → pushes an immutable <short-sha> tag and moves :testing
+#   dev  → pushes an immutable <short-sha> tag and moves :latest
 #   main → pushes the <short-sha> tag only; no floating stream
 #
-# :stable and :latest are never written here. They are moved by promote.yml
-# against a digest that has actually been booted and verified — see
-# docs/ARM64-ROADMAP.md §2.4 for why promotion re-tags rather than rebuilds.
+# :latest is the rolling stream, moved by every dev build — including the
+# automated rebuilds upstream-sync.yml triggers when upstream drifts.
+# :stable is never written here. It is moved by promote.yml against a digest
+# that has actually been booted and verified — see docs/ARM64-ROADMAP.md §2.4
+# for why promotion re-tags rather than rebuilds.
 #
 # ISO chosen over VMDK: Fusion on Apple Silicon rejected the bib stream-optimized
 # VMDK. Anaconda ISO matches the Silverblue workflow and boots reliably under
@@ -118,14 +120,15 @@ jobs:
           echo "ref=${GHCR_IMAGE}" >> "$GITHUB_OUTPUT"
           echo "sha_tag=${SHORT}" >> "$GITHUB_OUTPUT"
 
-          # :testing tracks dev only. main must not write it — main lags dev,
-          # so publishing from main would move the stream backwards for anyone
-          # tracking it.
+          # :latest is the rolling stream — moved by any dev build, whether that
+          # is a hand-written commit or an upstream-sync rebuild. main must not
+          # write it: main lags dev, so publishing from main would move the
+          # stream backwards for anyone tracking it.
           if [[ "${{ github.ref }}" == "refs/heads/dev" ]]; then
-            podman tag "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" "${GHCR_IMAGE}:testing"
-            podman push "${GHCR_IMAGE}:testing"
-            FLOAT_TAG="testing"
-            INSTALL_REF="${GHCR_IMAGE}:testing"
+            podman tag "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" "${GHCR_IMAGE}:latest"
+            podman push "${GHCR_IMAGE}:latest"
+            FLOAT_TAG="latest"
+            INSTALL_REF="${GHCR_IMAGE}:latest"
           else
             FLOAT_TAG="(none — main publishes the SHA tag only)"
             # Stamp :stable, not the SHA tag. main's ISO is the release artifact,
