@@ -1,0 +1,245 @@
+name: Upstream sync
+
+# Keeps this fork current with upstream without manual work.
+#
+# Two kinds of drift are tracked:
+#   1. Pinned container digests — Silverblue, projectbluefin/common,
+#      ublue-os/brew, and bootc-image-builder.
+#   2. The vendored projectbluefin/bluefin subtree under upstream/.
+#
+# When either moves, the change is committed to `dev` and a build is triggered,
+# which publishes :latest. `main` and :stable are untouched — those advance only
+# through review and an explicit promote.yml run.
+#
+# ─── Why skopeo rather than Renovate ────────────────────────────────────────
+# Upstream Bluefin uses Renovate for the same job, but its `docker` datasource
+# resolves multi-arch *index* digests. Every image here must be pinned to its
+# **arm64 child manifest** so the architecture is explicit and does not depend
+# on podman's platform resolution at build time. Upstream's own
+# image-versions.yml pins `common` to its amd64 child — copying that config
+# would silently reintroduce exactly the bug Containerfile warns about.
+# `skopeo inspect --raw` + a jq filter on .platform.architecture gives us the
+# child digest directly.
+#
+# ─── Why the build is dispatched explicitly ─────────────────────────────────
+# Commits pushed with GITHUB_TOKEN do not trigger other workflows — GitHub
+# blocks that to prevent recursion. So pushing to dev here would NOT start
+# build.yml on its own. The final step dispatches it against `dev` instead,
+# which needs `actions: write` and avoids having to store a PAT.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"   # daily, off the hour to avoid the scheduler stampede
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: "Trigger a build even if nothing changed (picks up RPM drift)"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write     # commit + push to dev
+  actions: write      # dispatch build.yml
+  issues: write       # report a patch-set break
+
+jobs:
+  sync:
+    name: Check upstream and rebuild
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - name: Checkout dev
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: dev
+          fetch-depth: 0      # subtree pull needs history
+
+      - name: Ensure skopeo
+        run: |
+          set -euo pipefail
+          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
+
+      - name: Refresh pinned arm64 digests
+        id: pins
+        run: |
+          set -euo pipefail
+
+          # Resolve an image reference to its linux/arm64 child manifest digest.
+          # Falls back to the single manifest when the image is not multi-arch,
+          # but only if that manifest is actually arm64 — never silently accept
+          # another architecture.
+          resolve_arm64() {
+            local ref="$1" raw child arch
+            raw=$(skopeo inspect --raw "docker://${ref}")
+            child=$(jq -r '.manifests[]? | select(.platform.architecture=="arm64" and .platform.os=="linux") | .digest' <<<"${raw}" | head -1)
+            if [[ -n "${child}" ]]; then
+              echo "${child}"; return 0
+            fi
+            arch=$(skopeo inspect "docker://${ref}" | jq -r '.Architecture')
+            if [[ "${arch}" != "arm64" ]]; then
+              echo "ERROR: ${ref} is not multi-arch and is ${arch}, not arm64" >&2
+              return 1
+            fi
+            skopeo inspect "docker://${ref}" | jq -r '.Digest'
+          }
+
+          changed=0
+          note() { echo "  $*"; CHANGELOG="${CHANGELOG:-}$*"$'\n'; }
+
+          # Containerfile ARG pins. Each entry: <label> <lookup-ref> <ARG name>
+          while read -r label lookup argname; do
+            [[ -z "${label}" ]] && continue
+            new=$(resolve_arm64 "${lookup}")
+            old=$(grep -oE "^ARG ${argname}=\"[^\"]*@sha256:[a-f0-9]+\"" Containerfile | grep -oE 'sha256:[a-f0-9]+' || true)
+            if [[ -n "${new}" && "${new}" != "${old}" ]]; then
+              sed -i -E "s|(^ARG ${argname}=\"[^\"]*)@sha256:[a-f0-9]+\"|\1@${new}\"|" Containerfile
+              note "${label}: ${old:0:19}… -> ${new:0:19}…"
+              changed=1
+            fi
+          done <<'PINS'
+          silverblue quay.io/fedora-ostree-desktops/silverblue:44 BASE_IMAGE_REF
+          common ghcr.io/projectbluefin/common:latest COMMON_IMAGE_REF
+          brew ghcr.io/ublue-os/brew:latest BREW_IMAGE_REF
+          PINS
+
+          # bootc-image-builder lives in build.yml's env block, not Containerfile.
+          bib_new=$(resolve_arm64 "quay.io/centos-bootc/bootc-image-builder:latest")
+          bib_old=$(grep -oE 'BIB_IMAGE: "[^"]*@sha256:[a-f0-9]+"' .github/workflows/build.yml | grep -oE 'sha256:[a-f0-9]+' || true)
+          if [[ -n "${bib_new}" && "${bib_new}" != "${bib_old}" ]]; then
+            sed -i -E "s|(BIB_IMAGE: \"[^\"]*)@sha256:[a-f0-9]+\"|\1@${bib_new}\"|" .github/workflows/build.yml
+            note "bootc-image-builder: ${bib_old:0:19}… -> ${bib_new:0:19}…"
+            changed=1
+          fi
+
+          echo "pins_changed=${changed}" >> "$GITHUB_OUTPUT"
+          { echo "changelog<<EOF"; echo "${CHANGELOG:-}"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+
+      - name: Pull the bluefin subtree
+        id: subtree
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          before=$(git rev-parse HEAD)
+          if git subtree pull --prefix=upstream \
+               https://github.com/projectbluefin/bluefin main --squash \
+               -m "Merge upstream bluefin into upstream/ (automated)"; then
+            after=$(git rev-parse HEAD)
+            if [[ "${before}" != "${after}" ]]; then
+              echo "subtree_changed=1" >> "$GITHUB_OUTPUT"
+            else
+              echo "subtree_changed=0" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            # A conflicting subtree pull leaves the tree mid-merge; abandon it
+            # rather than committing a broken state.
+            git merge --abort 2>/dev/null || true
+            git reset --hard "${before}"
+            echo "subtree_changed=conflict" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate the patch set still applies
+        id: patches
+        run: |
+          set -euo pipefail
+          # prepare-context.sh hard-fails when a patch no longer applies. That is
+          # the interlock: upstream drift must never be committed silently if it
+          # breaks our overlay.
+          if ./scripts/prepare-context.sh >/tmp/ctx.log 2>&1; then
+            echo "ok=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=0" >> "$GITHUB_OUTPUT"
+            tail -40 /tmp/ctx.log
+          fi
+
+      - name: Open an issue if upstream broke the patch set
+        if: steps.patches.outputs.ok == '0' || steps.subtree.outputs.subtree_changed == 'conflict'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TITLE="Upstream sync blocked $(date -u +%Y-%m-%d)"
+          # Avoid piling up duplicates on consecutive daily runs.
+          if gh issue list --state open --search "\"Upstream sync blocked\" in:title" --json number --jq 'length' | grep -qv '^0$'; then
+            echo "an open sync-blocked issue already exists; not filing another"
+            exit 0
+          fi
+          # Built with printf rather than a heredoc: heredoc bodies must sit at
+          # column 0, which would terminate this YAML block scalar early.
+          BODY=$(printf '%s\n' \
+            "The scheduled upstream sync could not complete without manual help." \
+            "" \
+            "- subtree pull: see the job log" \
+            "- patch set: \`scripts/prepare-context.sh\` failed, meaning a patch in" \
+            "  \`patches/\` no longer applies to the vendored upstream tree" \
+            "" \
+            "Nothing was committed. \`dev\` is untouched, so the previous build remains current." \
+            "" \
+            "Rebase the affected patch by hand, then re-run **Upstream sync** from the" \
+            "Actions tab. The failing patch and its rejected hunks are in the workflow log.")
+          gh issue create --title "${TITLE}" --body "${BODY}"
+
+      - name: Commit and push to dev
+        id: commit
+        if: steps.patches.outputs.ok == '1' && steps.subtree.outputs.subtree_changed != 'conflict'
+        # Passed through env rather than interpolated into the script: the value
+        # is multi-line, and ${{ }} substitution happens before bash parses,
+        # so embedding it directly would break on any quote or newline.
+        env:
+          CHANGELOG: ${{ steps.pins.outputs.changelog }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git add Containerfile .github/workflows/build.yml
+            git commit -m "Refresh pinned arm64 image digests (automated)" -m "${CHANGELOG}"
+          fi
+
+          if [[ -n "$(git log --oneline origin/dev..HEAD)" ]]; then
+            git push origin dev
+            echo "pushed=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "pushed=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Trigger a build
+        if: steps.commit.outputs.pushed == '1' || inputs.force_build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Required: the push above used GITHUB_TOKEN, which cannot trigger
+          # build.yml on its own. Dispatching against dev makes github.ref
+          # refs/heads/dev, so the build publishes :latest as normal.
+          gh workflow run build.yml --ref dev
+          echo "dispatched build.yml on dev"
+
+      - name: Summary
+        if: always()
+        env:
+          PINS_CHANGED: ${{ steps.pins.outputs.pins_changed }}
+          SUBTREE_CHANGED: ${{ steps.subtree.outputs.subtree_changed }}
+          PATCHES_OK: ${{ steps.patches.outputs.ok }}
+          PUSHED: ${{ steps.commit.outputs.pushed || '0' }}
+          CHANGELOG: ${{ steps.pins.outputs.changelog }}
+        run: |
+          {
+            echo "### Upstream sync"
+            echo '```'
+            echo "pins changed:    ${PINS_CHANGED:-?}"
+            echo "subtree changed: ${SUBTREE_CHANGED:-?}"
+            echo "patches apply:   ${PATCHES_OK:-?}"
+            echo "pushed to dev:   ${PUSHED:-0}"
+            echo '```'
+            if [[ -n "${CHANGELOG//[[:space:]]/}" ]]; then
+              echo "${CHANGELOG}"
+            fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"

@@ -1,8 +1,8 @@
 diff --git a/upstream/build_files/base/17-cleanup.sh b/upstream/build_files/base/17-cleanup.sh
-index f0189b3..f0bed9d 100755
+index f0189b3..2cbc0a3 100755
 --- a/upstream/build_files/base/17-cleanup.sh
 +++ b/upstream/build_files/base/17-cleanup.sh
-@@ -38,9 +38,106 @@ for file in fish htop nvtop; do
+@@ -38,9 +38,115 @@ for file in fish htop nvtop; do
  done
  
  #Add the Flathub Flatpak remote and remove the Fedora Flatpak remote
@@ -98,14 +98,23 @@ index f0189b3..f0bed9d 100755
 +# from every file in the directory rather than only omitting it from ours.
 +sed -i '/^CollectionID=/d' "${FLATPAK_PREINSTALL_DIR}"/*.preinstall
 +
++# NOTE: nothing is seeded into /etc/skel here, deliberately.
++#
 +# libsetup.sh's version-script opens
-+# $HOME/.local/share/ublue/setup_versioning.json.lock through a redirect that is
-+# set up *before* the mkdir inside the same subshell can run, so the directory
-+# has to exist beforehand or every hook silently no-ops (ublue-user-setup still
-+# exits 0). /etc/skel seeds it for accounts created after deployment; the
-+# root/system case is a tmpfiles.d rule in the Containerfile, since /root is a
-+# symlink to /var/roothome and /var is not part of the ostree commit.
-+mkdir -p /etc/skel/.local/share/ublue
++# $HOME/.local/share/ublue/setup_versioning.json.lock through a redirect the
++# shell evaluates *before* the mkdir inside the same subshell can run, so the
++# directory must already exist or ublue-user-setup silently no-ops (still
++# exiting 0). Seeding /etc/skel/.local/share/ublue looked like the obvious fix
++# and shipped in 56833d6 — that image then failed GNOME initial-setup with
++# `useradd` exit 12 ("cannot create home directory"), leaving an install with no
++# account and no way to log in. /etc/skel is copied verbatim by `useradd -m`,
++# so anything wrong with it breaks account creation outright.
++#
++# The trade is one-sided: the hooks this would enable are theming and oem-brew,
++# both cosmetic, against an unusable image. Left unseeded until the failure is
++# actually understood, and fixed by a mechanism that cannot touch useradd.
++# The root/system case is unaffected — that is a tmpfiles.d rule in the
++# Containerfile, since /root is a symlink to /var/roothome.
 +
  # NOTE: With isolated COPR installation, most repos are never enabled globally.
  # We only need to clean up repos that were enabled during the build process.

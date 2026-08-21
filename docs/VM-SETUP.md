@@ -69,13 +69,15 @@ the system is fully functional.
 
 | Tag | What it is |
 |---|---|
-| `:stable` | Last build booted and verified in a VM. Use this unless you're testing. |
-| `:latest` | Alias of `:stable`, for tooling that assumes `latest` exists. |
-| `:testing` | Newest `dev` build. May be broken; this is where fixes land first. |
+| `:stable` | Last build booted and verified by a human. **Use this** unless you want the bleeding edge. |
+| `:latest` | Rolling. Rebuilt automatically whenever upstream Bluefin or a base image moves. Untested. |
 | `<short-sha>` | Immutable, one per build. Use to pin an exact image. |
 
-`:stable` and `:latest` are only moved by a deliberate promotion of an image
-that has actually been booted — they are never written automatically by a build.
+`:latest` tracks upstream continuously and can break without warning — that is
+what it is for. `:stable` only moves when a specific image has been booted and
+promoted deliberately, so it is the safe default and the fallback to roll back to.
+
+Installing from an ISO gives you `:stable`.
 
 ## Updating (after first install)
 

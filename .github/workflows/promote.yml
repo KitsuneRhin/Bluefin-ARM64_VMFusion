@@ -19,11 +19,6 @@ on:
         description: "Build to promote — short SHA tag (e.g. 4f958ba) or a sha256:… digest"
         required: true
         type: string
-      also_latest:
-        description: "Also move :latest to this image"
-        required: false
-        default: true
-        type: boolean
 
 concurrency:
   group: promote
@@ -89,6 +84,9 @@ jobs:
             --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
             "${{ steps.src.outputs.pinned }}"
 
+      # :stable only. :latest is the rolling stream owned by build.yml and moved
+      # by every dev build, including upstream-sync rebuilds — writing it here
+      # would clobber the automation and silently roll users back.
       - name: Copy to :stable
         run: |
           set -euo pipefail
@@ -96,22 +94,13 @@ jobs:
             "docker://${{ steps.src.outputs.pinned }}" \
             "docker://${GHCR_IMAGE}:stable"
 
-      - name: Copy to :latest
-        if: ${{ inputs.also_latest }}
-        run: |
-          set -euo pipefail
-          skopeo copy --all \
-            "docker://${{ steps.src.outputs.pinned }}" \
-            "docker://${GHCR_IMAGE}:latest"
-
       - name: Summary
         run: |
           {
-            echo "### Promoted"
+            echo "### Promoted to :stable"
             echo '```'
-            echo "source:  ${{ inputs.source }}"
-            echo "digest:  ${{ steps.src.outputs.digest }}"
-            echo "streams: :stable$([[ "${{ inputs.also_latest }}" == "true" ]] && echo ' :latest')"
+            echo "source: ${{ inputs.source }}"
+            echo "digest: ${{ steps.src.outputs.digest }}"
             echo '```'
             echo "Rebase an installed VM with:"
             echo '```bash'
