@@ -94,6 +94,27 @@ jobs:
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
+      # Regression guard for the defect that made 56833d6 uninstallable: GNOME
+      # initial-setup failed with `useradd` exit 12 ("cannot create home
+      # directory"), producing an install with no account and no way to log in.
+      # It shipped because nothing in CI ever created a user.
+      #
+      # A container cannot reproduce the installed system exactly — SELinux is
+      # not enforcing the host policy here and /home is not yet ostree's symlink
+      # to /var/home — so passing this is NOT proof the installed image is fine.
+      # Failing it, however, is conclusive, and it costs a couple of seconds.
+      # Runs before the push so a broken image never reaches the registry.
+      - name: Smoke test — account creation
+        run: |
+          set -euo pipefail
+          podman run --rm "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" bash -euxc '
+            useradd -m -s /bin/bash smoketest
+            home=$(getent passwd smoketest | cut -d: -f6)
+            test -d "${home}" || { echo "home ${home} was not created"; exit 1; }
+            echo "OK: created ${home}"
+            ls -A "${home}" || true
+          '
+
       - name: Log in to GHCR
         run: |
           # podman login → used by podman push (image push step)

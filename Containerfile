@@ -21,15 +21,15 @@ ARG BASE_IMAGE_NAME="silverblue"
 ARG FEDORA_MAJOR_VERSION="44"
 ARG BASE_IMAGE="quay.io/fedora-ostree-desktops/silverblue"
 
-# arm64 child manifest digests, all verified live 2026-07-27.
+# arm64 child manifest digests, all verified live 2026-08-21.
 #
 # These are per-arch child digests, not multi-arch index digests, so the arch is
 # explicit and does not depend on podman's platform resolution. Note that
 # upstream's image-versions.yml pins `common` to its *amd64* child manifest —
 # that pin is unusable here and must not be copied over.
-ARG BASE_IMAGE_REF="${BASE_IMAGE}@sha256:a3cbab99847fa302d881100d2e7da1be2183ad7577f68250b999725054fe63f3"
-ARG COMMON_IMAGE_REF="ghcr.io/projectbluefin/common@sha256:497cb90e7d30e1a93fda67c112b3146fb43e5e64a774301d2d7025cb57d1e90a"
-ARG BREW_IMAGE_REF="ghcr.io/ublue-os/brew@sha256:8157460c2d2559ab7e5f2f6644a9c2be3b25fdf8d4a9fd42a34f6a0795eb359e"
+ARG BASE_IMAGE_REF="${BASE_IMAGE}@sha256:a012937635e8d6b50751b75e9079e3de84751366041b7b2ca81d88a2fb84792a"
+ARG COMMON_IMAGE_REF="ghcr.io/projectbluefin/common@sha256:c91be528d03b84d55dd96fdd2510ef4a6beb3d2505ec81d4486b7a17e4dc823c"
+ARG BREW_IMAGE_REF="ghcr.io/ublue-os/brew@sha256:aff477fa0ccbbb467946ed12e1ec6cd7726281e555daa152ef64af8f3106a5e6"
 
 # hadolint ignore=DL3006
 FROM ${COMMON_IMAGE_REF} AS common
@@ -142,8 +142,13 @@ RUN rm -rf /opt && ln -s /var/opt /opt
 # $HOME/.local/share/ublue/setup_versioning.json.lock through a redirect that the
 # shell sets up *before* the mkdir inside the same subshell runs; without the
 # directory, ublue-system-setup.service exits 0 having skipped every privileged
-# hook. The user-account equivalent is seeded via /etc/skel in 17-cleanup.sh.
-# Parents are declared explicitly rather than relying on implicit creation.
+# hook. Parents are declared explicitly rather than relying on implicit creation.
+#
+# This covers root only. The user-account equivalent was seeded via /etc/skel,
+# but that shipped in 56833d6 and broke `useradd` with exit 12 during GNOME
+# initial-setup, leaving an install with no account — see the note in
+# 17-cleanup.sh. User hooks (theming, oem-brew) therefore still no-op until a
+# mechanism exists that cannot interfere with account creation.
 RUN printf '%s\n' \
     'd /var/roothome/.local 0700 root root -' \
     'd /var/roothome/.local/share 0700 root root -' \
